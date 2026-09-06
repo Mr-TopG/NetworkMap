@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f17">
+  <meta name="description" content="NetworkMap — a clear, live map of your network.">
+  <title>NetworkMap</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M9 8.5 16 4l7 4.5v8L16 21l-7-4.5z"/><path d="M9 16.5v7L16 28l7-4.5v-7M16 21v7"/></svg>
+        </span>
+        <span><strong>NetworkMap</strong><small>Network workspace</small></span>
+      </div>
+
+      <div class="workspace-chip" aria-label="Current workspace">
+        <span class="workspace-icon">HQ</span>
+        <span><strong id="workspaceNameSide">Main network</strong><small>Local workspace</small></span>
+        <span class="status-dot online" title="Connected"></span>
+      </div>
+
+      <nav class="primary-nav">
+        <button class="nav-item active" data-view="overview" aria-current="page">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.6 7.1 6.5 15.8M13.4 7.1l4.1 8.7M7.5 18h9"/></svg>
+          <span>Overview</span>
+        </button>
+        <button class="nav-item" data-view="configuration">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/><circle cx="9" cy="5" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="19" r="2"/></svg>
+          <span>Configuration</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-note">
+        <div class="eyebrow">LIVE SYNC</div>
+        <div class="sync-row"><span class="pulse-dot"></span><strong id="syncLabel">Connecting…</strong></div>
+        <small id="syncDetail">Opening event stream</small>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="icon-text-btn" id="themeButton" title="Toggle appearance">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20.5 15.2A8 8 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg>
+          <span>Appearance</span>
+        </button>
+        <span class="version">v0.1.0</span>
+      </div>
+    </aside>
+
+    <button class="sidebar-scrim" id="sidebarScrim" aria-label="Close navigation"></button>
+
+    <main class="main" id="main-content">
+      <header class="topbar">
+        <div class="topbar-leading">
+          <button class="icon-btn menu-button" id="menuButton" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <div class="breadcrumbs"><span>Workspace</span><i>/</i><strong id="breadcrumbCurrent">Overview</strong></div>
+        </div>
+        <div class="top-actions">
+          <div class="connection-pill" id="connectionPill"><span class="status-dot"></span><span>Connecting</span></div>
+          <button class="button secondary compact" id="discoverButton">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>
+            <span>Scan network</span>
+          </button>
+        </div>
+      </header>
+
+      <section class="view active" id="overviewView" data-view-panel="overview" aria-labelledby="overviewTitle">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow">NETWORK OVERVIEW</div>
+            <h1 id="overviewTitle">Your network, at a glance</h1>
+            <p>Explore connections, inspect devices, and spot issues in real time.</p>
+          </div>
+          <div class="updated-label"><span class="status-dot online"></span><span id="lastUpdated">Awaiting first sync</span></div>
+        </div>
+
+        <div class="stat-grid" aria-label="Network summary">
+          <article class="stat-card accent-blue">
+            <div class="stat-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+            <div><small>Total devices</small><strong id="statDevices">—</strong><span id="statDevicesHint">Loading inventory</span></div>
+          </article>
+          <article class="stat-card accent-green">
+            <div class="stat-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div>
+            <div><small>Online now</small><strong id="statOnline">—</strong><span id="statOnlineHint">Checking status</span></div>
+          </article>
+          <article class="stat-card accent-violet">
+            <div class="stat-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 8h14M7 5 4 8l3 3M19 16H5M17 13l3 3-3 3"/></svg></div>
+            <div><small>Connections</small><strong id="statLinks">—</strong><span>Mapped links</span></div>
+          </article>
+          <article class="stat-card accent-amber">
+            <div class="stat-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg></div>
+            <div><small>Needs attention</small><strong id="statIssues">—</strong><span id="statIssuesHint">Offline devices</span></div>
+          </article>
+        </div>
+
+        <div class="overview-grid">
+          <article class="panel map-panel">
+            <header class="panel-header map-header">
+              <div>
+                <h2>Topology</h2>
+                <span id="mapSubtitle">Live network map</span>
+              </div>
+              <div class="map-header-actions">
+                <button class="button secondary compact" id="topologyEditButton" type="button" aria-pressed="false">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2Z"/></svg>
+                  <span>Edit topology</span>
+                </button>
+                <label class="search-field map-search">
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                  <span class="sr-only">Search map</span>
+                  <input id="mapSearch" type="search" placeholder="Find a device…" autocomplete="off">
+                </label>
+                <button class="icon-btn topology-edit-only" id="mapMenuButton" aria-label="Automatically arrange devices" title="Automatically arrange devices" hidden>
+                  <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M10.8 6.7 6.2 16M13.2 6.7l4.6 9.3M7 18h10"/></svg>
+                </button>
+              </div>
+            </header>
+            <div class="map-stage" id="mapStage">
+              <svg id="topology" role="img" aria-label="Interactive network topology" tabindex="0">
+                <defs>
+                  <filter id="nodeShadow" x="-60%" y="-60%" width="220%" height="220%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#02040a" flood-opacity=".55"/></filter>
+                  <filter id="nodeGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                  <pattern id="dotGrid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" class="grid-dot"/></pattern>
+                  <marker id="linkArrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="m1 1 6 3-6 3Z" class="arrow-head"/></marker>
+                </defs>
+                <g id="viewport">
+                  <rect id="mapBackground" x="-3000" y="-3000" width="6000" height="6000" fill="url(#dotGrid)"></rect>
+                  <g id="linkLayer"></g>
+                  <g id="nodeLayer"></g>
+                </g>
+              </svg>
+              <div class="map-loading" id="mapLoading" aria-live="polite"><span class="spinner"></span><span>Loading topology…</span></div>
+              <div class="map-empty hidden" id="mapEmpty">
+                <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span><i></i><i></i></div>
+                <h3>Map your first device</h3>
+                <p>Add devices manually or scan your local network to get started.</p>
+                <div><button class="button primary" id="openConfigurationButton">Open configuration</button><button class="button secondary" data-action="discover">Scan network</button></div>
+              </div>
+              <div class="map-zoom" aria-label="Map zoom controls">
+                <button id="zoomIn" aria-label="Zoom in" title="Zoom in"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+                <button id="zoomOut" aria-label="Zoom out" title="Zoom out"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+                <button id="fitMap" aria-label="Fit network to view" title="Fit to view"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg></button>
+              </div>
+              <div class="map-legend">
+                <span><i class="legend-status online"></i>Online</span>
+                <span><i class="legend-status offline"></i>Offline</span>
+                <span><i class="legend-status degraded"></i>Degraded</span>
+                <span><i class="legend-status unknown"></i>Unknown</span>
+              </div>
+              <div class="map-tip" id="mapTip">View mode · Click a device to inspect</div>
+            </div>
+          </article>
+
+          <aside class="panel inspector" id="inspector" aria-label="Device inspector">
+            <div class="inspector-placeholder" id="inspectorPlaceholder">
+              <div class="placeholder-orbit" aria-hidden="true"><span></span><i></i><i></i><i></i></div>
+              <h2>Select a device</h2>
+              <p>Choose any device on the map to view its details and configuration.</p>
+              <kbd>Click a node</kbd>
+            </div>
+            <div class="inspector-content hidden" id="inspectorContent">
+              <header class="inspector-header">
+                <div class="device-avatar large" id="inspectorAvatar"></div>
+                <div class="inspector-title"><div class="device-state" id="inspectorState"></div><h2 id="inspectorName"></h2><span id="inspectorKind"></span></div>
+                <button class="icon-btn" id="closeInspector" aria-label="Close inspector"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+              </header>
+              <div class="inspector-actions">
+                <button class="button primary full" id="openSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M17 13v6H5V7h6"/></svg><span>Open web interface</span></button>
+                <button class="button secondary" id="winboxSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="15" rx="2"/><path d="M8 22h8M12 19v3M7 9h10M7 13h6"/></svg><span>WinBox</span></button>
+                <button class="button secondary icon-only" id="focusSelected" title="Center on map" aria-label="Center on map"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+              </div>
+              <div class="inspector-actions topology-edit-only" hidden>
+                <button class="button secondary full" id="editSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2Z"/></svg>Edit device</button>
+                <button class="button secondary full" id="connectSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 12h8M12 8v8"/><circle cx="12" cy="12" r="9"/></svg>Add link</button>
+              </div>
+              <section class="detail-section"><h3>Device details</h3><dl class="detail-list" id="inspectorDetails"></dl></section>
+              <section class="detail-section"><div class="section-heading"><h3>Connections</h3></div><div class="connection-list" id="inspectorConnections"></div></section>
+              <section class="detail-section"><h3>Notes</h3><p class="device-notes" id="inspectorNotes"></p></section>
+              <button class="danger-link topology-edit-only" id="deleteSelected" hidden><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M9 11v6M15 11v6M6 7l1 14h10l1-14"/></svg>Remove device</button>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="configurationView" data-view-panel="configuration" aria-labelledby="configurationTitle" hidden>
+        <div class="page-heading config-heading">
+          <div><div class="eyebrow">WORKSPACE</div><h1 id="configurationTitle">Configuration</h1><p>Manage device records, connections, and workspace preferences.</p></div>
+          <button class="button primary" data-action="add-node"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add device</button>
+        </div>
+
+        <div class="config-tabs" role="tablist" aria-label="Configuration sections">
+          <button role="tab" aria-selected="true" aria-controls="inventoryPanel" id="inventoryTab" data-config-tab="inventory">Devices <span id="deviceTabCount">0</span></button>
+          <button role="tab" aria-selected="false" aria-controls="linksPanel" id="linksTab" data-config-tab="links">Connections <span id="linkTabCount">0</span></button>
+          <button role="tab" aria-selected="false" aria-controls="settingsPanel" id="settingsTab" data-config-tab="settings">Workspace</button>
+          <button role="tab" aria-selected="false" aria-controls="dataPanel" id="dataTab" data-config-tab="data">Data &amp; backup</button>
+        </div>
+
+        <div class="config-panel active" id="inventoryPanel" role="tabpanel" aria-labelledby="inventoryTab">
+          <article class="panel table-panel">
+            <header class="panel-header table-toolbar">
+              <div><h2>Device inventory</h2><span>Every device known to this workspace</span></div>
+              <div class="toolbar-actions">
+                <label class="search-field"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><span class="sr-only">Search inventory</span><input id="inventorySearch" type="search" placeholder="Search devices…"></label>
+                <label class="select-wrap"><span class="sr-only">Filter by status</span><select id="statusFilter"><option value="all">All statuses</option><option value="online">Online</option><option value="offline">Offline</option><option value="unknown">Unknown</option></select></label>
+              </div>
+            </header>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Device</th><th>Status</th><th>IP address</th><th>MAC address</th><th>Type</th><th><span class="sr-only">Actions</span></th></tr></thead>
+                <tbody id="deviceTableBody"></tbody>
+              </table>
+              <div class="table-empty hidden" id="deviceTableEmpty"><h3>No matching devices</h3><p>Try another search or add a new device.</p></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="config-panel" id="linksPanel" role="tabpanel" aria-labelledby="linksTab" hidden>
+          <article class="panel table-panel">
+            <header class="panel-header table-toolbar"><div><h2>Connections</h2><span>Physical and logical links between devices</span></div><button class="button primary" data-action="add-link"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add connection</button></header>
+            <div class="table-scroll">
+              <table><thead><tr><th>Source</th><th>Target</th><th>Interface / label</th><th>Speed</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="linkTableBody"></tbody></table>
+              <div class="table-empty hidden" id="linkTableEmpty"><h3>No connections yet</h3><p>Connect two devices to build your topology.</p><button class="button secondary" data-action="add-link">Add connection</button></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="config-panel settings-layout" id="settingsPanel" role="tabpanel" aria-labelledby="settingsTab" hidden>
+          <form class="panel settings-card" id="settingsForm">
+            <header class="panel-header"><div><h2>Workspace details</h2><span>Choose how this map is identified and refreshed</span></div></header>
+            <div class="form-body">
+              <label class="field"><span>Workspace name</span><input id="settingName" name="name" maxlength="80" placeholder="Main network"></label>
+              <label class="field"><span>Description <i>Optional</i></span><textarea id="settingDescription" name="description" rows="3" maxlength="280" placeholder="Office and lab infrastructure"></textarea></label>
+              <div class="field-row">
+                <label class="field"><span>Default discovery subnet <i>Private, up to 256 addresses</i></span><input id="settingSubnet" name="subnet" maxlength="64" placeholder="192.168.1.0/24"></label>
+                <label class="field"><span>Refresh interval</span><select id="settingRefresh" name="refresh_interval"><option value="0">Manual only</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option><option value="300">Every 5 minutes</option><option value="900">Every 15 minutes</option></select></label>
+              </div>
+              <label class="toggle-field"><span><strong>Show link labels</strong><small>Display interface names on the topology</small></span><input id="settingLinkLabels" name="show_link_labels" type="checkbox"><i aria-hidden="true"></i></label>
+              <label class="toggle-field"><span><strong>Compact device labels</strong><small>Show names only, hiding addresses on the map</small></span><input id="settingCompact" name="compact_labels" type="checkbox"><i aria-hidden="true"></i></label>
+            </div>
+            <footer class="form-footer"><span class="save-hint" id="settingsHint"></span><button class="button primary" type="submit">Save changes</button></footer>
+          </form>
+          <aside class="panel info-card"><div class="info-art" aria-hidden="true"><span></span><i></i><i></i><i></i></div><h3>Synced everywhere</h3><p>Changes made here are shared with every connected browser and the NetworkMap Linux app.</p><div class="revision-card"><span>Current revision</span><strong id="revisionLabel">—</strong></div></aside>
+        </div>
+
+        <div class="config-panel data-layout" id="dataPanel" role="tabpanel" aria-labelledby="dataTab" hidden>
+          <article class="panel data-card">
+            <div class="data-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div>
+            <div><h2>Export workspace</h2><p>Download your complete topology as a portable JSON backup.</p><button class="button secondary" id="exportButton">Download JSON</button></div>
+          </article>
+          <article class="panel data-card">
+            <div class="data-icon violet"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M5 3h14"/></svg></div>
+            <div><h2>Import workspace</h2><p>Replace this workspace with a previously exported NetworkMap file.</p><button class="button secondary" id="importButton">Choose JSON file</button><input id="importFile" class="sr-only" type="file" accept="application/json,.json"></div>
+          </article>
+          <article class="panel raw-data-card">
+            <header class="panel-header"><div><h2>Raw JSON editor</h2><span>For advanced users — validates before saving</span></div><button class="button ghost compact" id="copyJsonButton">Copy JSON</button></header>
+            <div class="raw-editor-wrap"><textarea id="rawJson" spellcheck="false" aria-label="Raw workspace JSON"></textarea><span class="json-validity" id="jsonValidity">Valid JSON</span></div>
+            <footer class="form-footer"><span class="save-hint">Saving replaces the current workspace.</span><button class="button primary" id="saveJsonButton">Validate &amp; save</button></footer>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog class="modal" id="nodeDialog" aria-labelledby="nodeDialogTitle">
+    <form method="dialog" id="nodeForm">
+      <header class="modal-header"><div><span class="modal-kicker" id="nodeDialogKicker">DEVICE</span><h2 id="nodeDialogTitle">Add a device</h2></div><button class="icon-btn" value="cancel" formnovalidate aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="modal-body">
+        <input type="hidden" name="id" id="nodeId">
+        <label class="field"><span>Device name <b>*</b></span><input name="name" id="nodeName" required maxlength="80" placeholder="e.g. Core Router"></label>
+        <div class="field-row">
+          <label class="field"><span>Device type</span><select name="kind" id="nodeType"><option value="router">Router</option><option value="switch">Switch</option><option value="server">Server</option><option value="workstation">Workstation</option><option value="laptop">Laptop</option><option value="mobile">Mobile device</option><option value="access-point">Access point</option><option value="firewall">Firewall</option><option value="storage">Storage</option><option value="nas">NAS</option><option value="printer">Printer</option><option value="camera">Camera</option><option value="iot">IoT device</option><option value="cloud">Cloud / Internet</option><option value="unknown">Unknown</option><option value="other">Other</option></select></label>
+          <label class="field"><span>Status</span><select name="status" id="nodeStatus"><option value="online">Online</option><option value="offline">Offline</option><option value="degraded">Degraded</option><option value="unknown">Unknown</option></select></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>IP address</span><input name="ip" id="nodeIp" inputmode="decimal" placeholder="192.168.1.1"></label>
+          <label class="field"><span>MAC address</span><input name="mac" id="nodeMac" placeholder="00:1A:2B:3C:4D:5E"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>Hostname</span><input name="hostname" id="nodeHostname" maxlength="253" placeholder="core-router.local"></label>
+          <label class="field"><span>Vendor / model</span><input name="vendor" id="nodeVendor" maxlength="100" placeholder="Ubiquiti Dream Machine"></label>
+        </div>
+        <label class="field"><span>Web management URL <i>HTTP or HTTPS</i></span><input name="management_url" id="nodeManagementUrl" type="url" maxlength="2048" placeholder="https://192.168.1.1"><small>Leave blank to use http:// with the device IP or hostname.</small></label>
+        <label class="toggle-field"><span><strong>Open with MikroTik WinBox</strong><small>Show a WinBox action for this device; credentials are never put in the link</small></span><input name="winbox_enabled" id="nodeWinboxEnabled" type="checkbox"><i aria-hidden="true"></i></label>
+        <label class="field"><span>Tags <i>Comma separated</i></span><input name="tags" id="nodeTags" maxlength="300" placeholder="core, office, managed"></label>
+        <label class="field"><span>Notes <i>Optional</i></span><textarea name="notes" id="nodeNotes" rows="3" maxlength="500" placeholder="Location, purpose, credentials reference…"></textarea></label>
+        <details class="advanced-fields"><summary>Advanced configuration</summary><label class="field"><span>Configuration JSON <i>Do not store passwords or secrets</i></span><textarea name="config" id="nodeConfig" rows="5" spellcheck="false" placeholder='{"snmp_enabled": false}'></textarea></label><p>Use this for non-sensitive, device-specific metadata.</p></details>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" value="cancel" formnovalidate>Cancel</button><button class="button primary" id="nodeSubmit" value="default">Add device</button></footer>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="linkDialog" aria-labelledby="linkDialogTitle">
+    <form method="dialog" id="linkForm">
+      <header class="modal-header"><div><span class="modal-kicker">CONNECTION</span><h2 id="linkDialogTitle">Add a connection</h2></div><button class="icon-btn" value="cancel" formnovalidate aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="modal-body">
+        <input type="hidden" name="id" id="linkId">
+        <div class="field-row">
+          <label class="field"><span>Source device <b>*</b></span><select name="source" id="linkSource" required></select></label>
+          <label class="field"><span>Target device <b>*</b></span><select name="target" id="linkTarget" required></select></label>
+        </div>
+        <label class="field"><span>Label / interface</span><input name="label" id="linkLabel" maxlength="80" placeholder="e.g. eth0 ↔ port 24"></label>
+        <div class="field-row">
+          <label class="field"><span>Connection type</span><select name="kind" id="linkType"><option value="ethernet">Ethernet</option><option value="fiber">Fiber</option><option value="wifi">Wi-Fi</option><option value="wireless">Wireless</option><option value="wan">WAN</option><option value="vpn">VPN / Tunnel</option><option value="logical">Logical</option><option value="other">Other</option></select></label>
+          <label class="field"><span>Bandwidth (Mbps)</span><input name="bandwidth_mbps" id="linkSpeed" type="number" min="0" step="any" placeholder="1000"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>Status</span><select name="status" id="linkStatus"><option value="active">Active</option><option value="inactive">Inactive</option><option value="degraded">Degraded</option><option value="unknown">Unknown</option></select></label>
+          <label class="toggle-field compact-toggle"><span><strong>Directed connection</strong><small>Show traffic direction</small></span><input name="directed" id="linkDirected" type="checkbox"><i aria-hidden="true"></i></label>
+        </div>
+        <label class="field"><span>Notes <i>Optional</i></span><textarea name="notes" id="linkNotes" rows="2" maxlength="500" placeholder="Circuit, VLAN, or route notes…"></textarea></label>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" value="cancel" formnovalidate>Cancel</button><button class="button primary" id="linkSubmit" value="default">Add connection</button></footer>
+    </form>
+  </dialog>
+
+  <dialog class="modal confirm-modal" id="confirmDialog" aria-labelledby="confirmTitle">
+    <form method="dialog">
+      <div class="confirm-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M9 11v6M15 11v6M6 7l1 14h10l1-14"/></svg></div>
+      <h2 id="confirmTitle">Remove device?</h2><p id="confirmMessage">This action cannot be undone.</p>
+      <div class="confirm-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" value="confirm" id="confirmButton">Remove</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="discoveryDialog" aria-labelledby="discoveryTitle">
+    <form method="dialog" id="discoveryForm">
+      <header class="modal-header"><div><span class="modal-kicker">NETWORK SCAN</span><h2 id="discoveryTitle">Discover devices</h2></div><button class="icon-btn" value="cancel" formnovalidate aria-label="Close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="modal-body discovery-body">
+        <div id="discoverySetup">
+          <p class="form-intro">Scan an authorized local subnet, then review the results before anything is added.</p>
+          <label class="field"><span>Subnet (CIDR) <b>*</b></span><input id="discoveryCidr" name="cidr" required maxlength="64" placeholder="192.168.1.0/24"></label>
+          <label class="toggle-field compact-toggle"><span><strong>Use nmap when available</strong><small>Provides richer host details on the Linux host</small></span><input id="discoveryNmap" name="use_nmap" type="checkbox" checked><i aria-hidden="true"></i></label>
+        </div>
+        <div id="discoveryProgress" class="discovery-progress hidden"><span class="spinner"></span><strong>Scanning your network…</strong><small>This may take a moment. Keep this window open.</small></div>
+        <div id="discoveryResults" class="hidden"><div class="discovery-result-heading"><div><strong id="discoveryCount">0 devices found</strong><small>Select the devices to add</small></div><button type="button" class="link-button" id="toggleDiscoverySelection">Select all</button></div><div class="discovery-list" id="discoveryList"></div></div>
+      </div>
+      <footer class="modal-footer"><button class="button secondary" value="cancel" formnovalidate>Cancel</button><button class="button primary" id="discoverySubmit" value="default">Start scan</button></footer>
+    </form>
+  </dialog>
+
+  <dialog class="modal confirm-modal auth-modal" id="authDialog" aria-labelledby="authTitle">
+    <form method="dialog" id="authForm">
+      <div class="confirm-icon auth-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></svg></div>
+      <h2 id="authTitle">Connect to NetworkMap</h2><p>This server requires an access token. It is exchanged for a private session cookie and is never written to the map.</p>
+      <label class="field auth-field"><span>Access token</span><input id="authToken" type="password" required autocomplete="off" placeholder="Paste your token"></label>
+      <div class="confirm-actions single"><button class="button primary" value="default">Connect</button></div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

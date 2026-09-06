@@ -1,0 +1,13 @@
+#!/bin/sh
+# Run NetworkMap from a source checkout or from the user-local installation.
+set -eu
+
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$launcher_dir/native.py" ] && [ -f "$launcher_dir/server.py" ]; then
+    app_dir=$launcher_dir
+else
+    app_dir=${NETWORKMAP_APP_DIR:-"$HOME/.local/lib/networkmap"}
+fi
+
+python_command=${NETWORKMAP_PYTHON:-python3}
+exec "$python_command" "$app_dir/native.py" "$@"

@@ -1,0 +1,36 @@
+[Unit]
+Description=NetworkMap web service
+Documentation=file://%h/.local/lib/networkmap/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=NETWORKMAP_HOST=127.0.0.1
+Environment=NETWORKMAP_PORT=8765
+EnvironmentFile=-%h/.config/networkmap/server.env
+ExecStart=/usr/bin/python3 %h/.local/lib/networkmap/server.py --host ${NETWORKMAP_HOST} --port ${NETWORKMAP_PORT} --data-dir %h/.local/share/networkmap
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+# The service only needs to read its code and write its own XDG data directory.
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/networkmap
+# AF_NETLINK lets the conservative `ip neigh` discovery helper read the host's
+# neighbor table. AF_PACKET lets an explicitly requested nmap scan use the
+# calling user's ordinary packet-socket access; no extra capabilities are added.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+RestrictRealtime=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,15 @@
+.git
+.github
+.env
+__pycache__
+*.py[cod]
+*.sqlite*
+data
+backups
+screenshots
+tests
+packaging
+native.py
+networkmap
+install.sh
+uninstall.sh

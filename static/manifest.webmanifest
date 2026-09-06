@@ -1,0 +1,14 @@
+{
+  "name": "NetworkMap",
+  "short_name": "NetworkMap",
+  "description": "A clear, synchronized map of your network.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#080b12",
+  "theme_color": "#0b0f17",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

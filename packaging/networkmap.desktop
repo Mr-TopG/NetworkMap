@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=NetworkMap
+GenericName=Network topology editor
+Comment=Map and configure devices and links on your network
+Exec=networkmap %u
+Icon=networkmap
+Terminal=false
+MimeType=x-scheme-handler/winbox;
+Categories=Network;
+StartupNotify=true
+StartupWMClass=io.github.networkmap.NetworkMap
+Keywords=network;topology;devices;diagram;
