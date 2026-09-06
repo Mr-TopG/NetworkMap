@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
+import uuid
 import http.cookiejar
 import http.client
 import urllib.error
@@ -121,12 +125,74 @@ class StoreTests(unittest.TestCase):
     def test_first_run_and_persistence(self) -> None:
         state = self.store.get_state()
         self.assertEqual(state["revision"], 1)
+        self.assertEqual(state["api_version"], 1)
+        uuid.UUID(state["instance_id"])
+        instance_id = state["instance_id"]
         self.assertEqual(len(state["nodes"]), 6)
         self.store.create_node({"id": "kept", "name": "Kept node"})
         reopened = server.StateStore(self.database)
         state = reopened.get_state()
         self.assertEqual(state["revision"], 2)
+        self.assertEqual(state["instance_id"], instance_id)
         self.assertIn("kept", {item["id"] for item in state["nodes"]})
+
+    def test_legacy_metadata_is_migrated_without_a_revision_change(self) -> None:
+        legacy_database = Path(self.temporary.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_database)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE metadata (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    revision INTEGER NOT NULL CHECK (revision >= 0),
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE nodes (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE links (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    target TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    data TEXT NOT NULL
+                );
+                INSERT INTO metadata VALUES(1, 7, '2025-01-02T03:04:05.000Z');
+                """
+            )
+            connection.execute(
+                "INSERT INTO settings(singleton, data) VALUES(1, ?)",
+                (json.dumps(server.DEFAULT_SETTINGS),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = server.StateStore(legacy_database)
+        state = migrated.get_state()
+        self.assertEqual(state["revision"], 7)
+        self.assertEqual(state["updated_at"], "2025-01-02T03:04:05.000Z")
+        self.assertEqual(state["api_version"], 1)
+        uuid.UUID(state["instance_id"])
+        self.assertEqual(
+            server.StateStore(legacy_database).get_state()["instance_id"],
+            state["instance_id"],
+        )
+
+    def test_import_metadata_never_replaces_database_identity(self) -> None:
+        before = self.store.get_state()
+        imported = deepcopy(before)
+        imported["instance_id"] = str(uuid.uuid4())
+        imported["api_version"] = 999
+        imported["nodes"] = []
+        imported["links"] = []
+
+        result = self.store.replace_state(imported)
+
+        self.assertEqual(result["instance_id"], before["instance_id"])
+        self.assertEqual(result["api_version"], 1)
+        self.assertEqual(result["nodes"], [])
 
     def test_new_storage_is_private(self) -> None:
         private_database = Path(self.temporary.name) / "nested-data" / "state.sqlite3"
@@ -206,12 +272,13 @@ class HTTPTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
         self.static = root / "static"
+        self.data_dir = root / "data"
         self.static.mkdir()
         (self.static / "index.html").write_text("<h1>NetworkMap test</h1>", encoding="utf-8")
         (self.static / "styles.css").write_text("body{}", encoding="utf-8")
         self.running = server.ServerThread(
             port=0,
-            data_dir=root / "data",
+            data_dir=self.data_dir,
             static_dir=self.static,
         ).start()
 
@@ -246,12 +313,42 @@ class HTTPTests(unittest.TestCase):
         payload = json.loads(raw.decode("utf-8")) if raw else {}
         return response.status, payload, response.headers
 
+    def write_sync_status(self, **changes) -> dict:
+        metadata = self.running.server.store.get_metadata()
+        status = {
+            "schema_version": 1,
+            "session_id": str(uuid.uuid4()),
+            "local_instance_id": metadata["instance_id"],
+            "mode": "native-sync",
+            "state": "synced",
+            "remote_url": "https://networkmap.example.test",
+            "message": "Up to date",
+            "pending_changes": 0,
+            "last_sync_at": "2026-09-06T12:00:00.000Z",
+            "can_resolve": False,
+            "heartbeat": time.time(),
+            "local_revision": metadata["revision"],
+            "remote_revision": metadata["revision"],
+            "remote_instance_id": str(uuid.uuid4()),
+            "token": "must-never-leave-the-status-file",
+        }
+        status.update(changes)
+        path = self.data_dir / server.SYNC_STATUS_FILENAME
+        path.write_text(json.dumps(status), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return status
+
     def test_health_state_and_static_prefix(self) -> None:
         status, health, _ = self.request("/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(health["status"], "ok")
+        self.assertEqual(health["version"], "0.2.0")
+        self.assertEqual(health["api_version"], 1)
+        uuid.UUID(health["instance_id"])
         status, state, headers = self.request("/api/state")
         self.assertEqual(status, 200)
+        self.assertEqual(state["instance_id"], health["instance_id"])
+        self.assertEqual(state["api_version"], health["api_version"])
         self.assertEqual(headers["ETag"], f'"{state["revision"]}"')
         with urllib.request.urlopen(self.running.url + "/", timeout=3) as response:
             self.assertIn(b"NetworkMap test", response.read())
@@ -313,6 +410,188 @@ class HTTPTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(imported["nodes"], [])
+
+    def test_sync_status_uses_safe_default_for_missing_malformed_and_stale_files(self) -> None:
+        status, payload, _ = self.request("/api/sync/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["mode"], "server")
+        self.assertEqual(payload["state"], "hosted")
+
+        status_path = self.data_dir / server.SYNC_STATUS_FILENAME
+        status_path.write_text("{not json", encoding="utf-8")
+        status, malformed, _ = self.request("/api/sync/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(malformed["available"])
+
+        self.write_sync_status(heartbeat=time.time() - 61)
+        status, stale, _ = self.request("/api/sync/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(stale["available"])
+
+        self.write_sync_status(local_instance_id=str(uuid.uuid4()))
+        status, wrong_database, _ = self.request("/api/sync/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(wrong_database["available"])
+
+    def test_sync_status_returns_only_allowlisted_active_native_fields(self) -> None:
+        decision_id = "a" * 64
+        written = self.write_sync_status(
+            state="conflict",
+            pending_changes=3,
+            can_resolve=True,
+            decision_id=decision_id,
+        )
+
+        status, payload, _ = self.request("/api/sync/status")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["mode"], "native-sync")
+        self.assertEqual(payload["state"], "conflict")
+        self.assertEqual(payload["pending_changes"], 3)
+        self.assertTrue(payload["can_resolve"])
+        self.assertEqual(payload["decision_id"], decision_id)
+        self.assertEqual(payload["session_id"], written["session_id"])
+        self.assertNotIn("token", payload)
+        self.assertNotIn("must-never", json.dumps(payload))
+
+    def test_sync_action_requires_active_native_session_and_writes_private_command(self) -> None:
+        status, unavailable, _ = self.request(
+            "/api/sync/actions", method="POST", value={"action": "sync-now"}
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(unavailable["error"]["code"], "sync_unavailable")
+
+        decision_id = "b" * 64
+        active = self.write_sync_status(
+            state="conflict", can_resolve=True, decision_id=decision_id
+        )
+        status, accepted, _ = self.request(
+            "/api/sync/actions",
+            method="POST",
+            value={"action": "use-local", "decision_id": decision_id},
+        )
+        self.assertEqual(status, 202)
+        self.assertTrue(accepted["accepted"])
+        uuid.UUID(accepted["command_id"])
+
+        command_path = self.data_dir / server.SYNC_COMMAND_FILENAME
+        command = json.loads(command_path.read_text(encoding="utf-8"))
+        self.assertEqual(stat.S_IMODE(command_path.stat().st_mode), 0o600)
+        self.assertEqual(
+            set(command),
+            {
+                "schema_version",
+                "command_id",
+                "action",
+                "session_id",
+                "local_instance_id",
+                "decision_id",
+                "requested_at",
+            },
+        )
+        self.assertEqual(command["action"], "use-local")
+        self.assertEqual(command["session_id"], active["session_id"])
+        self.assertEqual(command["local_instance_id"], active["local_instance_id"])
+        self.assertEqual(command["decision_id"], decision_id)
+        self.assertNotIn("token", command)
+
+    def test_sync_now_writes_an_empty_decision_binding(self) -> None:
+        self.write_sync_status(state="synced", can_resolve=False)
+
+        status, accepted, _ = self.request(
+            "/api/sync/actions", method="POST", value={"action": "sync-now"}
+        )
+
+        self.assertEqual(status, 202)
+        self.assertTrue(accepted["accepted"])
+        command_path = self.data_dir / server.SYNC_COMMAND_FILENAME
+        command = json.loads(command_path.read_text(encoding="utf-8"))
+        self.assertEqual(command["action"], "sync-now")
+        self.assertEqual(command["decision_id"], "")
+
+    def test_sync_resolution_requires_current_resolvable_decision(self) -> None:
+        cases = (
+            ({"state": "synced", "can_resolve": True, "decision_id": "c" * 64}, "c" * 64),
+            ({"state": "conflict", "can_resolve": False, "decision_id": "d" * 64}, "d" * 64),
+            ({"state": "conflict", "can_resolve": True}, "e" * 64),
+            ({"state": "conflict", "can_resolve": True, "decision_id": "D" * 64}, "d" * 64),
+            ({"state": "conflict", "can_resolve": True, "decision_id": "e" * 63}, "e" * 64),
+        )
+        for changes, requested_decision in cases:
+            with self.subTest(changes=changes):
+                self.write_sync_status(**changes)
+                status, payload, _ = self.request(
+                    "/api/sync/actions",
+                    method="POST",
+                    value={
+                        "action": "use-hosted",
+                        "decision_id": requested_decision,
+                    },
+                )
+                self.assertEqual(status, 409)
+                self.assertEqual(
+                    payload["error"]["code"], "sync_resolution_unavailable"
+                )
+
+        self.write_sync_status(
+            state="conflict", can_resolve=True, decision_id="not-safe"
+        )
+        status, payload, _ = self.request("/api/sync/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["available"])
+        self.assertNotIn("decision_id", payload)
+
+        self.write_sync_status(
+            state="conflict", can_resolve=True, decision_id="f" * 64
+        )
+        for requested in (None, "", "F" * 64, "f" * 63):
+            value = {"action": "use-hosted"}
+            if requested is not None:
+                value["decision_id"] = requested
+            with self.subTest(requested=requested):
+                status, payload, _ = self.request(
+                    "/api/sync/actions", method="POST", value=value
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "validation_error")
+
+    def test_sync_resolution_rejects_a_conflict_newer_than_the_ui_choice(self) -> None:
+        displayed_decision = "1" * 64
+        current_decision = "2" * 64
+        self.write_sync_status(
+            state="conflict", can_resolve=True, decision_id=current_decision
+        )
+
+        status, payload, _ = self.request(
+            "/api/sync/actions",
+            method="POST",
+            value={
+                "action": "use-local",
+                "decision_id": displayed_decision,
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"]["code"], "sync_resolution_unavailable")
+        self.assertFalse((self.data_dir / server.SYNC_COMMAND_FILENAME).exists())
+
+    def test_sync_action_rejects_invalid_or_extra_fields(self) -> None:
+        self.write_sync_status()
+        for value in (
+            {"action": "delete-everything"},
+            {"action": []},
+            {"action": "sync-now", "token": "not-allowed"},
+            {"action": "sync-now", "decision_id": "a" * 64},
+            {},
+        ):
+            with self.subTest(value=value):
+                status, payload, _ = self.request(
+                    "/api/sync/actions", method="POST", value=value
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "validation_error")
 
     def test_public_or_oversized_discovery_is_rejected(self) -> None:
         for cidr in ("8.8.8.0/24", "10.0.0.0/8"):

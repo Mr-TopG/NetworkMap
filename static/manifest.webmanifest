@@ -1,7 +1,7 @@
 {
   "name": "NetworkMap",
   "short_name": "NetworkMap",
-  "description": "A clear, synchronized map of your network.",
+  "description": "An offline-first, synchronized map of your network.",
   "id": "/",
   "start_url": "/",
   "scope": "/",

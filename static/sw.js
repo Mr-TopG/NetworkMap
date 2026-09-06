@@ -1,4 +1,4 @@
-const CACHE = "networkmap-shell-v4";
+const CACHE = "networkmap-shell-v5";
 const SHELL = ["/", "/static/styles.css", "/static/app.js", "/static/favicon.svg", "/static/manifest.webmanifest"];
 const SHELL_PATHS = new Set(["/", "/index.html", "/static/styles.css", "/static/app.js", "/static/favicon.svg", "/static/manifest.webmanifest"]);
 

@@ -46,8 +46,8 @@ Wait until `/container/print` shows `status=stopped`, then start it:
 /container/start networkmap
 ```
 
-Open `http://192.168.88.250:8765` and enter the configured token. Point the
-Linux app at the same shared server:
+Open `http://192.168.88.250:8765` and enter the configured token. Configure the
+Linux app to synchronize its offline local copy with the router:
 
 ```bash
 networkmap --server-url http://192.168.88.250:8765

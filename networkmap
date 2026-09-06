@@ -5,6 +5,8 @@ set -eu
 launcher_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if [ -f "$launcher_dir/native.py" ] && [ -f "$launcher_dir/server.py" ]; then
     app_dir=$launcher_dir
+elif [ -f "$launcher_dir/../lib/networkmap/native.py" ] && [ -f "$launcher_dir/../lib/networkmap/server.py" ]; then
+    app_dir=$(CDPATH= cd -- "$launcher_dir/../lib/networkmap" && pwd)
 else
     app_dir=${NETWORKMAP_APP_DIR:-"$HOME/.local/lib/networkmap"}
 fi

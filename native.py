@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """NetworkMap Linux desktop shell.
 
-The shell embeds the web application with GTK 3 and WebKitGTK 4.1.  With no
-arguments it starts (or reuses) the loopback NetworkMap server.  It can also
-connect to a hosted instance; that choice is remembered without storing the
-authentication token.
+The shell embeds the web application with GTK 3 and WebKitGTK 4.1.  It always
+starts (or reuses) the loopback NetworkMap server so the app works offline.  An
+optional hosted instance is synchronized in the background; its address is
+remembered without storing the authentication token.
 
 Only Python's standard library is used here apart from the distro-provided
 PyGObject/WebKitGTK bindings.
@@ -15,11 +15,13 @@ from __future__ import annotations
 import argparse
 import html
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,15 +32,21 @@ from typing import Any, Optional
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+
+from networkmap_sync import SyncWorker
 
 
 APP_NAME = "NetworkMap"
 APP_ID = "io.github.networkmap.NetworkMap"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 APP_DIR = Path(__file__).resolve().parent
 WINBOX_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:%\-\[\]]{0,252}$")
+HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+LOCAL_API_VERSION = 1
+MAX_LOCAL_PROBE_BYTES = 32 * 1024 * 1024
 
 
 def _config_path() -> Path:
@@ -153,29 +161,214 @@ def _api_url(base_url: str, route: str) -> str:
     return base_url.rstrip("/") + "/" + route.lstrip("/")
 
 
-def _is_networkmap_server(base_url: str, timeout: float = 0.5) -> bool:
-    request = urllib.request.Request(
-        _api_url(base_url, "/api/health"),
-        headers={"Accept": "application/json", "User-Agent": "NetworkMap-native"},
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: Any,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        return None
+
+
+class _LocalProbeUnavailable(RuntimeError):
+    """No service completed the local API probe."""
+
+
+class _LocalProbeIncompatible(RuntimeError):
+    """A service answered, but it is not the required local NetworkMap API."""
+
+
+class _LocalProbeAuthenticationError(RuntimeError):
+    """The local NetworkMap server rejected the supplied token."""
+
+
+def _canonical_instance_id(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise _LocalProbeIncompatible(
+            "the NetworkMap API did not provide a stable instance ID"
+        )
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise _LocalProbeIncompatible(
+            "the NetworkMap API returned an invalid instance ID"
+        ) from exc
+
+
+def _probe_json(
+    opener: Any,
+    url: str,
+    *,
+    token: Optional[str],
+    timeout: float,
+) -> dict[str, Any]:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "NetworkMap-native",
+    }
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        response = opener.open(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        try:
+            if exc.code in {401, 403}:
+                raise _LocalProbeAuthenticationError(
+                    "the local NetworkMap access token was rejected"
+                ) from None
+            if 300 <= exc.code < 400:
+                raise _LocalProbeIncompatible(
+                    "redirects are not accepted for the local NetworkMap API"
+                ) from None
+            if 500 <= exc.code < 600:
+                raise _LocalProbeUnavailable(
+                    f"the local NetworkMap API returned HTTP {exc.code}"
+                ) from None
+            raise _LocalProbeIncompatible(
+                f"the local service returned HTTP {exc.code}"
+            ) from None
+        finally:
+            exc.close()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _LocalProbeUnavailable("the local service could not be reached") from exc
+
+    with response:
+        status = getattr(response, "status", None)
+        if status is None:
+            status = response.getcode()
+        if status != 200:
+            raise _LocalProbeIncompatible(
+                f"the local service returned HTTP {int(status)}"
+            )
+        if response.geturl() != url:
+            raise _LocalProbeIncompatible(
+                "redirects are not accepted for the local NetworkMap API"
+            )
+        media_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+        if media_type.strip().lower() != "application/json":
+            raise _LocalProbeIncompatible(
+                "the local NetworkMap API did not return JSON"
+            )
+        declared = response.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except ValueError as exc:
+                raise _LocalProbeIncompatible(
+                    "the local NetworkMap API returned an invalid response length"
+                ) from exc
+            if declared_size < 0 or declared_size > MAX_LOCAL_PROBE_BYTES:
+                raise _LocalProbeIncompatible(
+                    "the local NetworkMap API response is too large"
+                )
+        raw = response.read(MAX_LOCAL_PROBE_BYTES + 1)
+    if len(raw) > MAX_LOCAL_PROBE_BYTES:
+        raise _LocalProbeIncompatible("the local NetworkMap API response is too large")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise _LocalProbeIncompatible(
+            "the local NetworkMap API returned invalid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise _LocalProbeIncompatible(
+            "the local NetworkMap API response is not a JSON object"
+        )
+    return payload
+
+
+def _probe_networkmap_server(
+    base_url: str, token: Optional[str], timeout: float = 0.5
+) -> dict[str, Any]:
+    """Verify a local server without following redirects or leaking via proxies."""
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirect(),
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            if response.status != 200:
-                return False
-            payload = json.loads(response.read(64 * 1024).decode("utf-8"))
-    except (
-        OSError,
-        UnicodeError,
-        ValueError,
-        urllib.error.URLError,
-        json.JSONDecodeError,
+        health = _probe_json(
+            opener,
+            _api_url(base_url, "/api/health"),
+            token=None,
+            timeout=timeout,
+        )
+    except _LocalProbeAuthenticationError as exc:
+        raise _LocalProbeIncompatible(
+            "the local service does not expose the public NetworkMap health API"
+        ) from exc
+    if (
+        health.get("status") != "ok"
+        or type(health.get("api_version")) is not int
+        or health["api_version"] != LOCAL_API_VERSION
     ):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("status") == "ok"
-        and "version" in payload
+        raise _LocalProbeIncompatible(
+            f"the local service is not NetworkMap API v{LOCAL_API_VERSION}"
+        )
+    instance_id = _canonical_instance_id(health.get("instance_id"))
+
+    state = _probe_json(
+        opener,
+        _api_url(base_url, "/api/state"),
+        token=token.strip() if token and token.strip() else None,
+        timeout=timeout,
     )
+    if (
+        type(state.get("api_version")) is not int
+        or state["api_version"] != LOCAL_API_VERSION
+        or _canonical_instance_id(state.get("instance_id")) != instance_id
+        or isinstance(state.get("revision"), bool)
+        or not isinstance(state.get("revision"), int)
+        or state["revision"] < 0
+    ):
+        raise _LocalProbeIncompatible(
+            "the local NetworkMap health and state identities do not agree"
+        )
+    return {
+        "api_version": LOCAL_API_VERSION,
+        "instance_id": instance_id,
+        "revision": state["revision"],
+    }
+
+
+def _database_instance_id(database_path: Path) -> Optional[str]:
+    """Read the intended database identity without creating or changing the DB."""
+
+    if not database_path.exists():
+        return None
+    if database_path.is_symlink() or not database_path.is_file():
+        raise RuntimeError(
+            f"the intended local database is not a regular file: {database_path}"
+        )
+    connection: Optional[sqlite3.Connection] = None
+    try:
+        uri = database_path.resolve().as_uri() + "?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=0.5)
+        row = connection.execute(
+            "SELECT instance_id FROM metadata WHERE singleton = 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"could not verify the intended local database identity: {database_path}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+    if row is None:
+        raise RuntimeError(
+            f"the intended local database has no identity: {database_path}"
+        )
+    try:
+        return str(uuid.UUID(row[0]))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"the intended local database has an invalid identity: {database_path}"
+        ) from exc
 
 
 def _load_server_module() -> ModuleType:
@@ -202,22 +395,62 @@ class LocalServer:
         port: int,
         data_dir: Optional[str],
         token: Optional[str],
+        server_module: Optional[ModuleType] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.data_dir = data_dir
         self.token = token
+        self.server_module = server_module
         self.url = _loopback_url(host, port)
         self.httpd: Any = None
         self.thread: Optional[threading.Thread] = None
         self.reused = False
 
+    def _database_path(self, module: ModuleType) -> Path:
+        if self.data_dir is not None:
+            root = Path(self.data_dir).expanduser()
+        else:
+            default_data_dir = getattr(module, "default_data_dir", None)
+            if not callable(default_data_dir):
+                raise RuntimeError("server.py does not expose default_data_dir()")
+            root = Path(default_data_dir()).expanduser()
+        return root / "networkmap.sqlite3"
+
+    def _accept_running_server(
+        self,
+        probe: dict[str, Any],
+        database_path: Path,
+    ) -> None:
+        intended_id = _database_instance_id(database_path)
+        if intended_id is None or probe["instance_id"] != intended_id:
+            raise RuntimeError(
+                f"a different NetworkMap database is already served at {self.url}; "
+                f"refusing to open or synchronize the wrong local map. Stop that "
+                f"server or choose another --port (requested database: {database_path})"
+            )
+        self.reused = True
+
+    def _probe_existing(self, database_path: Path) -> bool:
+        try:
+            probe = _probe_networkmap_server(self.url, self.token)
+        except _LocalProbeAuthenticationError as exc:
+            raise RuntimeError(
+                f"a NetworkMap server is already running at {self.url}, but its "
+                "local access token does not match. Use the same token or choose "
+                "another --port"
+            ) from exc
+        except (_LocalProbeUnavailable, _LocalProbeIncompatible):
+            return False
+        self._accept_running_server(probe, database_path)
+        return True
+
     def start(self) -> None:
-        if _is_networkmap_server(self.url):
-            self.reused = True
+        module = self.server_module or _load_server_module()
+        database_path = self._database_path(module)
+        if self._probe_existing(database_path):
             return
 
-        module = _load_server_module()
         create_server = getattr(module, "create_server", None)
         if not callable(create_server):
             raise RuntimeError("server.py does not expose create_server()")
@@ -234,12 +467,13 @@ class LocalServer:
             # A second launcher can win the race between our first health
             # probe and bind(). Give it a brief chance to become ready.
             for _ in range(20):
-                if _is_networkmap_server(self.url):
-                    self.reused = True
+                if self._probe_existing(database_path):
                     return
                 time.sleep(0.1)
             raise RuntimeError(
-                f"could not bind the local server at {self.url}: {exc}"
+                f"could not bind the local server at {self.url}; the port is in "
+                f"use and no compatible NetworkMap server for {database_path} "
+                f"could be safely reused: {exc}"
             ) from exc
 
         self.thread = threading.Thread(
@@ -249,7 +483,24 @@ class LocalServer:
         )
         self.thread.start()
         for _ in range(100):
-            if _is_networkmap_server(self.url):
+            try:
+                probe = _probe_networkmap_server(self.url, self.token)
+            except _LocalProbeUnavailable:
+                probe = None
+            except (_LocalProbeAuthenticationError, _LocalProbeIncompatible) as exc:
+                self.stop()
+                raise RuntimeError(
+                    f"the local server at {self.url} failed its identity and "
+                    f"authentication check: {exc}"
+                ) from exc
+            if probe is not None:
+                intended_id = _database_instance_id(database_path)
+                if intended_id is None or probe["instance_id"] != intended_id:
+                    self.stop()
+                    raise RuntimeError(
+                        f"the local server at {self.url} does not match the "
+                        f"requested database: {database_path}"
+                    )
                 return
             if not self.thread.is_alive():
                 break
@@ -346,6 +597,65 @@ def _launch_winbox(target: str) -> None:
         raise RuntimeError(f"could not start WinBox: {exc}") from exc
 
 
+def _ssh_target_from_uri(uri: str) -> str:
+    parsed = urllib.parse.urlsplit(uri)
+    if parsed.scheme.lower() != "networkmap-ssh" or parsed.netloc != "connect":
+        raise ValueError("invalid SSH launch URL")
+    if parsed.query or parsed.fragment or not parsed.path.startswith("/"):
+        raise ValueError("SSH launch URL cannot contain a query or fragment")
+    encoded_target = parsed.path[1:]
+    if not encoded_target or "/" in encoded_target:
+        raise ValueError("SSH launch URL must contain one encoded target")
+    target = urllib.parse.unquote(encoded_target, errors="strict").strip()
+    if not target or len(target) > 253 or target.startswith("-"):
+        raise ValueError("SSH target must be an IP address or hostname")
+    try:
+        ipaddress.ip_address(target)
+    except ValueError:
+        hostname = target.rstrip(".")
+        if not hostname or any(
+            not HOST_LABEL_RE.fullmatch(label) for label in hostname.split(".")
+        ):
+            raise ValueError("SSH target must be an IP address or hostname") from None
+        target = hostname.lower()
+    return target
+
+
+def _ssh_terminal_command(target: str) -> list[str]:
+    ssh = shutil.which("ssh")
+    if not ssh:
+        raise RuntimeError("The OpenSSH client was not found. Install the 'ssh' command first.")
+    candidates = (
+        ("x-terminal-emulator", lambda terminal: [terminal, "-e", ssh, target]),
+        ("gnome-terminal", lambda terminal: [terminal, "--", ssh, target]),
+        ("kgx", lambda terminal: [terminal, "--", ssh, target]),
+        ("konsole", lambda terminal: [terminal, "-e", ssh, target]),
+        ("xfce4-terminal", lambda terminal: [terminal, "--execute", ssh, target]),
+        ("xterm", lambda terminal: [terminal, "-e", ssh, target]),
+        ("alacritty", lambda terminal: [terminal, "-e", ssh, target]),
+        ("kitty", lambda terminal: [terminal, ssh, target]),
+    )
+    for name, command in candidates:
+        terminal = shutil.which(name)
+        if terminal:
+            return command(terminal)
+    raise RuntimeError("No supported terminal emulator was found for the SSH session.")
+
+
+def _launch_ssh(target: str) -> None:
+    try:
+        subprocess.Popen(
+            _ssh_terminal_command(target),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"could not start SSH: {exc}") from exc
+
+
 def _load_gtk() -> tuple[Any, Any, Any, Any]:
     try:
         import gi
@@ -367,6 +677,7 @@ def _run_gui(
     initial_url: str,
     developer_tools: bool,
     gtk_modules: tuple[Any, Any, Any, Any],
+    remote_url: Optional[str] = None,
 ) -> int:
     Gio, GLib, Gtk, WebKit2 = gtk_modules
 
@@ -376,6 +687,8 @@ def _run_gui(
             self.window: Any = None
             self.webview: Any = None
             self.spinner: Any = None
+            self._last_external_uri = ""
+            self._last_external_at = 0.0
 
         def do_activate(self) -> None:
             if self.window is not None:
@@ -391,7 +704,11 @@ def _run_gui(
             header = Gtk.HeaderBar()
             header.set_show_close_button(True)
             header.set_title(APP_NAME)
-            header.set_subtitle(base_url)
+            if remote_url:
+                remote_host = urllib.parse.urlsplit(remote_url).netloc
+                header.set_subtitle(f"Local copy · sync with {remote_host}")
+            else:
+                header.set_subtitle("Local copy")
             self.window.set_titlebar(header)
 
             reload_button = Gtk.Button.new_from_icon_name(
@@ -418,6 +735,7 @@ def _run_gui(
             self.webview.connect("load-changed", self._on_load_changed)
             self.webview.connect("load-failed", self._on_load_failed)
             self.webview.connect("decide-policy", self._on_decide_policy)
+            self.webview.connect("create", self._on_create_webview)
             self.webview.connect("notify::title", self._on_title_changed)
             self.window.add(self.webview)
 
@@ -504,17 +822,32 @@ code {{ overflow-wrap: anywhere; }}
             if not is_new_window and _same_origin(base_url, uri):
                 return False
             decision.ignore()
-            if urllib.parse.urlsplit(uri).scheme.lower() == "winbox":
-                try:
-                    _launch_winbox(_winbox_target_from_uri(uri))
-                except (RuntimeError, ValueError, UnicodeError) as exc:
-                    self._show_error("Could not open WinBox", str(exc))
-                return True
-            try:
-                Gio.AppInfo.launch_default_for_uri(uri, None)
-            except GLib.Error as exc:
-                self._show_error("Could not open external link", str(exc))
+            self._open_external_uri(uri)
             return True
+
+        def _on_create_webview(self, _view: Any, navigation_action: Any) -> None:
+            uri = navigation_action.get_request().get_uri()
+            if uri:
+                self._open_external_uri(uri)
+            return None
+
+        def _open_external_uri(self, uri: str) -> None:
+            now = time.monotonic()
+            if uri == self._last_external_uri and now - self._last_external_at < 0.75:
+                return
+            self._last_external_uri = uri
+            self._last_external_at = now
+            scheme = urllib.parse.urlsplit(uri).scheme.lower()
+            try:
+                if scheme == "winbox":
+                    _launch_winbox(_winbox_target_from_uri(uri))
+                elif scheme == "networkmap-ssh":
+                    _launch_ssh(_ssh_target_from_uri(uri))
+                else:
+                    Gio.AppInfo.launch_default_for_uri(uri, None)
+            except (GLib.Error, RuntimeError, ValueError, UnicodeError) as exc:
+                label = "WinBox" if scheme == "winbox" else "SSH" if scheme == "networkmap-ssh" else "external link"
+                self._show_error(f"Could not open {label}", str(exc))
 
     application = NetworkMapApplication()
     return int(application.run([sys.argv[0]]))
@@ -524,25 +857,26 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="networkmap",
         description=(
-            "Open NetworkMap as a Linux desktop app. By default a local server "
-            "is started or reused; --server-url connects to shared hosting."
+            "Open NetworkMap as an offline-first Linux desktop app. A local "
+            "server is always started or reused; --server-url synchronizes "
+            "that local copy with shared hosting."
         )
     )
     target = parser.add_mutually_exclusive_group()
     target.add_argument(
         "--server-url",
         metavar="URL",
-        help="hosted NetworkMap URL; remembered for future launches",
+        help="hosted NetworkMap sync URL; remembered for future launches",
     )
     target.add_argument(
         "--local",
         action="store_true",
-        help="use the local server for this launch, ignoring a saved URL",
+        help="work locally for this launch without using the saved sync URL",
     )
     target.add_argument(
         "--forget-server-url",
         action="store_true",
-        help="forget the saved hosted URL and use the local server",
+        help="forget the saved hosted sync URL and keep working locally",
     )
     parser.add_argument(
         "--no-remember",
@@ -625,7 +959,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.launch_uri:
         try:
-            _launch_winbox(_winbox_target_from_uri(args.launch_uri))
+            scheme = urllib.parse.urlsplit(args.launch_uri).scheme.lower()
+            if scheme == "winbox":
+                _launch_winbox(_winbox_target_from_uri(args.launch_uri))
+            elif scheme == "networkmap-ssh":
+                _launch_ssh(_ssh_target_from_uri(args.launch_uri))
+            else:
+                raise ValueError("unsupported launch URL")
         except (RuntimeError, ValueError, UnicodeError) as exc:
             parser.exit(1, f"{parser.prog}: error: {exc}\n")
         return 0
@@ -659,35 +999,72 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not args.local and not args.forget_server_url:
         requested_remote = explicit_remote or environment_remote or saved_remote
 
-    local_server: Optional[LocalServer] = None
+    remote_url: Optional[str] = None
     if requested_remote:
         try:
-            base_url = _normalise_server_url(str(requested_remote))
+            remote_url = _normalise_server_url(str(requested_remote))
         except ValueError as exc:
             parser.exit(2, f"{parser.prog}: error: {exc}\n")
         if explicit_remote and not args.no_remember:
             try:
-                _remember_server(base_url)
+                _remember_server(remote_url)
             except OSError as exc:
                 parser.exit(1, f"{parser.prog}: error: could not save config: {exc}\n")
-    else:
-        base_url = _loopback_url(args.host, args.port)
-        local_server = LocalServer(
-            host=args.host,
-            port=args.port,
-            data_dir=args.data_dir,
-            token=token,
+
+    base_url = _loopback_url(args.host, args.port)
+    if remote_url and _same_origin(base_url, remote_url):
+        parser.error("--server-url must identify a different hosted server")
+
+    try:
+        server_module = _load_server_module()
+        default_data_dir = getattr(server_module, "default_data_dir")
+        demo_factory = getattr(server_module, "demo_document")
+        data_dir = Path(args.data_dir).expanduser() if args.data_dir else Path(default_data_dir())
+    except Exception as exc:
+        parser.exit(1, f"{parser.prog}: error: could not load the local server: {exc}\n")
+
+    local_server = LocalServer(
+        host=args.host,
+        port=args.port,
+        data_dir=str(data_dir),
+        token=token,
+        server_module=server_module,
+    )
+    try:
+        local_server.start()
+    except Exception as exc:
+        parser.exit(1, f"{parser.prog}: error: {exc}\n")
+
+    sync_worker: Optional[SyncWorker] = None
+    try:
+        sync_worker = SyncWorker(
+            base_url,
+            remote_url,
+            data_dir,
+            local_token=token,
+            remote_token=token,
+            demo_document=demo_factory(),
         )
-        try:
-            local_server.start()
-        except Exception as exc:
-            parser.exit(1, f"{parser.prog}: error: {exc}\n")
+        sync_worker.start()
+    except Exception as exc:
+        print(f"warning: hosted synchronization could not start: {exc}", file=sys.stderr)
 
     initial_url = _tokenised_url(base_url, token)
     try:
-        return _run_gui(base_url, initial_url, args.developer_tools, gtk_modules)
+        return _run_gui(
+            base_url,
+            initial_url,
+            args.developer_tools,
+            gtk_modules,
+            remote_url,
+        )
     finally:
-        if local_server is not None:
+        try:
+            if sync_worker is not None:
+                # The default wait is deliberate: never stop the local API
+                # underneath a sync pass that may still be verifying a PUT.
+                sync_worker.stop()
+        finally:
             local_server.stop()
 
 

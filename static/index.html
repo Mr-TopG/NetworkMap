@@ -23,8 +23,8 @@
 
       <div class="workspace-chip" aria-label="Current workspace">
         <span class="workspace-icon">HQ</span>
-        <span><strong id="workspaceNameSide">Main network</strong><small>Local workspace</small></span>
-        <span class="status-dot online" title="Connected"></span>
+        <span><strong id="workspaceNameSide">Main network</strong><small id="workspaceMode">Loading workspace</small></span>
+        <span class="status-dot unknown" id="workspaceStatusDot" title="Checking workspace status"></span>
       </div>
 
       <nav class="primary-nav">
@@ -39,9 +39,9 @@
       </nav>
 
       <div class="sidebar-note">
-        <div class="eyebrow">LIVE SYNC</div>
+        <div class="eyebrow">WORKSPACE SYNC</div>
         <div class="sync-row"><span class="pulse-dot"></span><strong id="syncLabel">Connecting…</strong></div>
-        <small id="syncDetail">Opening event stream</small>
+        <small id="syncDetail">Opening the local workspace</small>
       </div>
 
       <div class="sidebar-footer">
@@ -49,7 +49,7 @@
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20.5 15.2A8 8 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg>
           <span>Appearance</span>
         </button>
-        <span class="version">v0.1.0</span>
+        <span class="version">v0.2.0</span>
       </div>
     </aside>
 
@@ -173,7 +173,8 @@
                 <button class="icon-btn" id="closeInspector" aria-label="Close inspector"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
               </header>
               <div class="inspector-actions">
-                <button class="button primary full" id="openSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M17 13v6H5V7h6"/></svg><span>Open web interface</span></button>
+                <a class="button primary full" id="manageSelected" href="#" target="_blank" rel="noopener noreferrer"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M17 13v6H5V7h6"/></svg><span>Manage</span></a>
+                <a class="button secondary" id="sshSelected" href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 7 5 5-5 5M12 17h7"/><rect x="2.5" y="3.5" width="19" height="17" rx="2"/></svg><span>SSH</span></a>
                 <button class="button secondary" id="winboxSelected"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="15" rx="2"/><path d="M8 22h8M12 19v3M7 9h10M7 13h6"/></svg><span>WinBox</span></button>
                 <button class="button secondary icon-only" id="focusSelected" title="Center on map" aria-label="Center on map"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
               </div>
@@ -247,7 +248,22 @@
             </div>
             <footer class="form-footer"><span class="save-hint" id="settingsHint"></span><button class="button primary" type="submit">Save changes</button></footer>
           </form>
-          <aside class="panel info-card"><div class="info-art" aria-hidden="true"><span></span><i></i><i></i><i></i></div><h3>Synced everywhere</h3><p>Changes made here are shared with every connected browser and the NetworkMap Linux app.</p><div class="revision-card"><span>Current revision</span><strong id="revisionLabel">—</strong></div></aside>
+          <aside class="panel info-card sync-info-card" id="syncInfoCard">
+            <div class="info-art" aria-hidden="true"><span></span><i></i><i></i><i></i></div>
+            <h3 id="syncCardTitle">Checking workspace</h3>
+            <p id="syncCardDetail">Loading local and hosted synchronization status.</p>
+            <dl class="sync-meta">
+              <div><dt>Hosted server</dt><dd id="syncRemote">Not configured</dd></div>
+              <div><dt>Last synchronized</dt><dd id="syncLastRun">Never</dd></div>
+            </dl>
+            <div class="sync-card-actions">
+              <button class="button secondary full" id="syncNowButton" type="button" hidden>Sync now</button>
+              <button class="button secondary full" id="useHostedButton" type="button" hidden>Use hosted copy</button>
+              <button class="button primary full" id="useLocalButton" type="button" hidden>Upload local copy</button>
+            </div>
+            <small class="sync-backup-note hidden" id="syncBackupNote">Both copies are backed up before either one is replaced.</small>
+            <div class="revision-card"><span>Local revision</span><strong id="revisionLabel">—</strong></div>
+          </aside>
         </div>
 
         <div class="config-panel data-layout" id="dataPanel" role="tabpanel" aria-labelledby="dataTab" hidden>
@@ -287,8 +303,7 @@
           <label class="field"><span>Hostname</span><input name="hostname" id="nodeHostname" maxlength="253" placeholder="core-router.local"></label>
           <label class="field"><span>Vendor / model</span><input name="vendor" id="nodeVendor" maxlength="100" placeholder="Ubiquiti Dream Machine"></label>
         </div>
-        <label class="field"><span>Web management URL <i>HTTP or HTTPS</i></span><input name="management_url" id="nodeManagementUrl" type="url" maxlength="2048" placeholder="https://192.168.1.1"><small>Leave blank to use http:// with the device IP or hostname.</small></label>
-        <label class="toggle-field"><span><strong>Open with MikroTik WinBox</strong><small>Show a WinBox action for this device; credentials are never put in the link</small></span><input name="winbox_enabled" id="nodeWinboxEnabled" type="checkbox"><i aria-hidden="true"></i></label>
+        <label class="field"><span>Web management URL <i>HTTP or HTTPS</i></span><input name="management_url" id="nodeManagementUrl" type="url" maxlength="2048" placeholder="https://192.168.1.1"><small>Other devices default to HTTP at their IP. Servers use SSH, and MikroTik devices use WinBox.</small></label>
         <label class="field"><span>Tags <i>Comma separated</i></span><input name="tags" id="nodeTags" maxlength="300" placeholder="core, office, managed"></label>
         <label class="field"><span>Notes <i>Optional</i></span><textarea name="notes" id="nodeNotes" rows="3" maxlength="500" placeholder="Location, purpose, credentials reference…"></textarea></label>
         <details class="advanced-fields"><summary>Advanced configuration</summary><label class="field"><span>Configuration JSON <i>Do not store passwords or secrets</i></span><textarea name="config" id="nodeConfig" rows="5" spellcheck="false" placeholder='{"snmp_enabled": false}'></textarea></label><p>Use this for non-sensitive, device-specific metadata.</p></details>

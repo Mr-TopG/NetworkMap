@@ -23,7 +23,7 @@ native:
 check: check-web check-native
 
 check-web:
-	$(PYTHON) -m py_compile server.py scripts/smoke_test.py tests/test_server.py tests/test_native.py
+	$(PYTHON) -m py_compile server.py networkmap_sync.py scripts/smoke_test.py tests/test_server.py tests/test_native.py tests/test_sync.py
 	$(PYTHON) server.py --help >/dev/null
 	sh -n install.sh uninstall.sh
 

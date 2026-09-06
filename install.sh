@@ -18,7 +18,7 @@ applications_dir="$data_home/applications"
 icons_dir="$data_home/icons/hicolor/scalable/apps"
 units_dir="$data_home/systemd/user"
 
-for required in server.py native.py networkmap static packaging/networkmap.desktop assets/networkmap.svg; do
+for required in server.py native.py networkmap_sync.py networkmap static packaging/networkmap.desktop assets/networkmap.svg; do
     if [ ! -e "$source_dir/$required" ]; then
         echo "install.sh: missing required project file: $required" >&2
         exit 1
@@ -51,6 +51,7 @@ trap 'exit 1' HUP INT TERM
 install -d -m 0755 "$stage_dir/static" "$stage_dir/packaging/systemd" "$stage_dir/packaging/nginx" "$stage_dir/packaging/routeros"
 install -m 0755 "$source_dir/server.py" "$stage_dir/server.py"
 install -m 0755 "$source_dir/native.py" "$stage_dir/native.py"
+install -m 0644 "$source_dir/networkmap_sync.py" "$stage_dir/networkmap_sync.py"
 cp -R "$source_dir/static/." "$stage_dir/static/"
 chmod -R u=rwX,go=rX "$stage_dir/static"
 

@@ -13,45 +13,54 @@ Python or JavaScript dependencies. The Linux window uses the GTK 3 and WebKitGTK
 
 - Locked-by-default topology with pan, zoom, fit-to-view, search, and an explicit
   edit mode for dragging nodes or changing links
-- Click-through device inspector with HTTP/HTTPS management launch actions
-- MikroTik-aware WinBox launch from the Linux app, with a copy-address fallback
+- Click-through device inspector with reliable HTTP/HTTPS management links
+- One-click SSH terminal launch for mapped servers in the Linux app
+- Automatic MikroTik vendor detection and WinBox launch, with a copy-address fallback
 - Separate configuration tabs for inventory, connections, workspace, and data
 - SQLite persistence with validated, atomic updates and revision conflict checks
-- Live synchronization between open browser and desktop clients using
-  Server-Sent Events (SSE)
+- Offline-first Linux app with a durable local copy and guarded synchronization
+  to an optional hosted server
+- Live updates between clients using Server-Sent Events (SSE)
 - JSON export/import for portable backups
 - Conservative local discovery using the host's neighbor table, with optional
   `nmap` discovery
 - Optional shared-token authentication for hosted use
-- GTK/WebKit Linux shell that starts a local server or connects to a hosted one
+- GTK/WebKit Linux shell that always works locally, including while the hosted
+  server is unavailable
 - User-local desktop, icon, launcher, and systemd service packaging
 - Multi-architecture container image and PC/RouterOS deployment examples
 
-This version can open a device's web interface or hand its address to WinBox,
-but it does not submit login forms, store device passwords, or push vendor
-configuration commands. Passwords are deliberately excluded until NetworkMap
-has an encrypted OS-keyring-backed credential design. The per-device JSON area
-is for non-secret metadata only.
+This version can open a device's web interface, launch an SSH terminal for a
+server, or hand a MikroTik address to WinBox. It does not submit login forms,
+store device passwords, or push vendor configuration commands. Passwords are
+deliberately excluded until NetworkMap has an encrypted OS-keyring-backed
+credential design. The per-device JSON area is for non-secret metadata only.
 
 ## Architecture and synchronization
 
 ```text
- Browser on any machine ---------\
-                                  HTTP API + SSE       SQLite
- Linux GTK/WebKit client -------->  server.py  --------> state
-                                      ^
- Local browser/native client --------/
+ Browser clients ---> hosted server + SQLite
+                           ^
+                           | guarded snapshot sync
+                           v
+ Linux window ----> local server + SQLite
 ```
 
-There is one source of truth: the server selected by a client. To see the same
-map in the web UI and Linux app, point both at the same hosted URL. Updates are
-written to that server and broadcast to every connected client. This is shared
-server synchronization, not file synchronization between separate local
-databases.
+The Linux app always opens its local database. Every edit is committed locally
+first, so the topology remains available when the hosted computer or router is
+offline. When a hosted URL is configured, a background worker compares both
+copies with their last synchronized snapshot. A local-only change is uploaded;
+a hosted-only change is downloaded; equal copies require no write.
 
-The default native launch uses a local database. A saved hosted URL takes
-precedence on later launches; `--local` temporarily selects the local database,
-and `--forget-server-url` returns the default to local.
+Independent databases have independent revision numbers, so NetworkMap never
+uses the larger revision or newest wall-clock time as "the winner." If both
+copies changed after their last synchronization, it pauses without modifying
+either one. **Configuration → Workspace** then offers **Use hosted copy** or
+**Upload local copy**, and both versions are backed up before the choice is
+applied. On first pairing, an untouched built-in demo can safely adopt the other
+copy automatically; two real, different maps require the same explicit choice.
+That choice is bound to the exact two snapshots shown. If either map changes
+before it is applied, NetworkMap writes nothing and asks again with fresh copies.
 
 ## Quick start
 
@@ -82,25 +91,38 @@ sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
 ./native.py --check
 ```
 
-The desktop process embeds the server in a background thread and stops that
-server when the app exits. If a healthy NetworkMap server is already listening
-on `127.0.0.1:8765`—for example, the optional user service—the app reuses it.
+The desktop process embeds the local server in a background thread and stops it
+when the app exits. If a healthy NetworkMap server is already listening on
+`127.0.0.1:8765`—for example, the optional user service—the app reuses it. Hosted
+synchronization is separate and never makes the window depend on remote uptime.
+Reuse is allowed only when the running API has the expected version, token, and
+database identity, preventing the window from silently opening another data
+directory's map.
 
 ## Open a real device
 
-Click a device on the Overview map. **Open HTTP** or **Open HTTPS** launches its
-management page in a separate browser tab. NetworkMap uses the explicit **Web
-management URL** from the device editor; when that field is blank, it falls back
-to `http://` plus the device hostname or IP address. Edit the URL to switch a
-device to HTTPS, use a non-default port, or add a WebFig path.
+Click a device on the Overview map. **Manage** is a normal HTTP/HTTPS link, so it
+works in both browsers and the embedded Linux window. NetworkMap uses the
+explicit **Web management URL** from the device editor; for non-server devices a
+blank field falls back to `http://` plus the device IP address. Edit the URL to
+switch to HTTPS, use a non-default port, or add a WebFig path.
 
-For a device marked **Open with MikroTik WinBox** (or identified as MikroTik),
-the inspector also shows **WinBox**. In the NetworkMap Linux app this launches an
-installed `winbox`/`WinBox` executable with the device address. Set
+The computer running the browser must be able to route to that device address.
+When viewing a hosted map away from its LAN, use a VPN or another safe route to
+the private network; the NetworkMap server does not proxy device interfaces.
+
+A server with an IP address or hostname gets an **SSH** action instead of an
+assumed HTTP page. The Linux app opens `ssh` safely in an installed terminal and
+lets OpenSSH handle host verification, keys, and password prompts.
+
+When the device's **Vendor / model** field contains `MikroTik`, the inspector
+automatically shows **WinBox**—there is no separate checkbox. In the NetworkMap
+Linux app this launches an installed `winbox`/`WinBox` executable with the
+device address instead of showing Manage. Set
 `NETWORKMAP_WINBOX=/path/to/WinBox` if it is not on `PATH`. A regular browser
 can hand the `winbox://` link to an installed desktop handler; NetworkMap also
 tries to copy the address when clipboard permission is available. No username
-or password is placed in either URL.
+or password is placed in the Manage, SSH, or WinBox URL.
 
 ## Install the Linux app
 
@@ -127,9 +149,11 @@ Application files are moved under
 `~/.local/state/networkmap/uninstall-backups/` rather than deleted. The script
 prints the exact recovery directory.
 
-## Connect the native app to hosted NetworkMap
+## Synchronize the native app with hosted NetworkMap
 
-The following remembers only the server URL:
+The following remembers only the server URL and keeps the window on its local
+copy. It immediately checks whether it should upload local changes, download the
+hosted version, or ask which different first copy to use:
 
 ```bash
 networkmap --server-url https://networkmap.example.net
@@ -147,16 +171,16 @@ networkmap --server-url https://networkmap.example.net
 ```
 
 Alternatively use `NETWORKMAP_TOKEN`, `--token-file PATH`, or (least preferred,
-because process listings can expose it) `--token TOKEN`. The token is included
-only in the initial URL fragment, which is never sent to the HTTP server. The
-frontend exchanges it for an HttpOnly session cookie and immediately removes
-the fragment. NetworkMap never stores it in `native.json` or prints it.
+because process listings can expose it) `--token TOKEN`. The Python sync worker
+sends it only in the hosted API's Authorization header. NetworkMap never writes
+the token into its remembered URL, synchronization checkpoint, backups, or
+status files.
 
 Useful controls:
 
 ```bash
-networkmap --local                 # ignore a remembered URL once
-networkmap --forget-server-url     # remove it from native.json
+networkmap --local                 # work locally without syncing this launch
+networkmap --forget-server-url     # disconnect and remove the remembered peer
 networkmap --server-url URL --no-remember
 networkmap --developer-tools       # enable the WebKit inspector
 ```
@@ -259,10 +283,10 @@ check same-host origins when browsers send an `Origin` header. The session
 cookie is `HttpOnly`, `SameSite=Strict`, and path-scoped, but it is not marked
 `Secure` by the loopback HTTP server—that must be handled at the TLS proxy.
 
-The health endpoint is public and reports only service status, version,
-revision, and update time. A token protects all state and mutation endpoints.
-NetworkMap currently provides a shared bearer token rather than individual user
-accounts or authorization roles.
+The health endpoint is public and reports only service status, API/version and
+database identity, revision, and update time. A token protects all state and
+mutation endpoints. NetworkMap currently provides a shared bearer token rather
+than individual user accounts or authorization roles.
 
 Run a single NetworkMap server process for each database. SQLite coordinates
 data writes, but live SSE notifications are intentionally in-process and are
@@ -270,10 +294,11 @@ not a multi-worker message bus.
 
 ## Discovery boundaries
 
-Discovery runs on the machine hosting `server.py`. A local desktop launch scans
-the desktop's local network; a desktop connected to a remote server asks that
-remote host to scan *its* network. It does not install or control a discovery
-agent on the desktop.
+Discovery runs on the machine serving the UI. The offline-first Linux window is
+always served by its local process, so it scans the desktop's network even while
+synchronizing with a router. A browser opened directly on the hosted server asks
+that hosted machine to scan its network. NetworkMap does not install or control
+separate discovery agents.
 
 NetworkMap validates that discovery targets are private networks and caps the
 scan size. The basic scan reads the Linux neighbor table and is non-invasive.
@@ -313,6 +338,8 @@ is required, stop every server process and copy the complete data directory.
 | Server database | `~/.local/share/networkmap/networkmap.sqlite3` (or `$XDG_DATA_HOME/networkmap/networkmap.sqlite3`) |
 | Remembered native URL | `${XDG_CONFIG_HOME:-~/.config}/networkmap/native.json` |
 | Optional native token | `${XDG_CONFIG_HOME:-~/.config}/networkmap/token` |
+| Native sync checkpoint/status | Next to the local database as private `.native-sync-*.json` files |
+| Sync conflict backups | `~/.local/share/networkmap/sync-backups/` |
 | Installed application | `~/.local/lib/networkmap` |
 | User service | `${XDG_DATA_HOME:-~/.local/share}/systemd/user/networkmap.service` |
 | Previous app versions after upgrade | `${XDG_STATE_HOME:-~/.local/state}/networkmap/install-backups/` |
@@ -332,6 +359,8 @@ The UI uses the same JSON API available to scripts:
 | --- | --- |
 | `GET /api/health` | Public readiness and version check |
 | `GET /api/state` | Complete topology and current revision |
+| `GET /api/sync/status` | Safe hosted-sync status for the local UI |
+| `POST /api/sync/actions` | Request sync now or resolve a two-copy conflict |
 | `GET /api/events` | Live SSE update stream |
 | `POST /api/session` | Exchange a bearer token for an HttpOnly browser session |
 | `POST /api/nodes` | Create a device |
@@ -344,7 +373,9 @@ The UI uses the same JSON API available to scripts:
 
 State-changing requests accept an expected revision so concurrent editors do
 not silently overwrite one another. API errors use a stable JSON shape with an
-error code and human-readable message.
+error code and human-readable message. Conflict-resolution requests must echo
+the current `decision_id` from `/api/sync/status`; stale choices are rejected
+without modifying either copy.
 
 ## Development checks
 

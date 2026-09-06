@@ -30,23 +30,30 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import threading
+import time
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 import uuid
 import xml.etree.ElementTree as ET
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+API_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_DISCOVERY_HOSTS = 256
+SYNC_STATUS_FILENAME = ".native-sync-status.json"
+SYNC_COMMAND_FILENAME = ".native-sync-command.json"
+SYNC_HEARTBEAT_MAX_AGE = 60
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
 HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+SYNC_DECISION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 NODE_KINDS = {
     "router",
@@ -539,7 +546,6 @@ def demo_document() -> dict[str, Any]:
             "hostname": "gateway.local",
             "vendor": "MikroTik",
             "management_url": "https://192.168.1.1",
-            "winbox_enabled": True,
             "status": "online",
             "x": 330,
             "y": 280,
@@ -642,6 +648,8 @@ def validate_state_document(raw: Any) -> dict[str, Any]:
         "exported_at",
         "format",
         "version",
+        "instance_id",
+        "api_version",
     }
     _reject_unknown_fields(obj, allowed, "state")
     for required in ("nodes", "links", "settings"):
@@ -810,10 +818,24 @@ class StateStore:
                     CREATE TABLE IF NOT EXISTS metadata (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         revision INTEGER NOT NULL CHECK (revision >= 0),
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        instance_id TEXT NOT NULL,
+                        api_version INTEGER NOT NULL
                     )
                     """
                 )
+                metadata_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(metadata)")
+                }
+                if "instance_id" not in metadata_columns:
+                    connection.execute(
+                        "ALTER TABLE metadata ADD COLUMN instance_id TEXT"
+                    )
+                if "api_version" not in metadata_columns:
+                    connection.execute(
+                        "ALTER TABLE metadata ADD COLUMN api_version INTEGER NOT NULL DEFAULT 1"
+                    )
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS nodes (
@@ -840,18 +862,38 @@ class StateStore:
                     )
                     """
                 )
-                exists = connection.execute(
-                    "SELECT 1 FROM metadata WHERE singleton = 1"
+                metadata = connection.execute(
+                    "SELECT instance_id, api_version FROM metadata WHERE singleton = 1"
                 ).fetchone()
-                if exists is None:
+                if metadata is None:
                     sample = demo_document()
                     now = utc_now()
+                    instance_id = str(uuid.uuid4())
                     connection.execute(
-                        "INSERT INTO metadata(singleton, revision, updated_at) VALUES(1, 1, ?)",
-                        (now,),
+                        """
+                        INSERT INTO metadata(
+                            singleton, revision, updated_at, instance_id, api_version
+                        ) VALUES(1, 1, ?, ?, ?)
+                        """,
+                        (now, instance_id, API_VERSION),
                     )
                     self._insert_document(connection, sample)
                 else:
+                    instance_id = metadata["instance_id"]
+                    try:
+                        valid_instance_id = str(uuid.UUID(instance_id))
+                    except (AttributeError, TypeError, ValueError):
+                        valid_instance_id = str(uuid.uuid4())
+                    if instance_id != valid_instance_id:
+                        connection.execute(
+                            "UPDATE metadata SET instance_id = ? WHERE singleton = 1",
+                            (valid_instance_id,),
+                        )
+                    if metadata["api_version"] is None:
+                        connection.execute(
+                            "UPDATE metadata SET api_version = ? WHERE singleton = 1",
+                            (API_VERSION,),
+                        )
                     # Normalize settings from early development builds without
                     # making an ordinary upgrade look like a user edit.
                     settings_row = connection.execute(
@@ -910,7 +952,10 @@ class StateStore:
 
     def _read_state(self, connection: sqlite3.Connection) -> dict[str, Any]:
         metadata = connection.execute(
-            "SELECT revision, updated_at FROM metadata WHERE singleton = 1"
+            """
+            SELECT revision, updated_at, instance_id, api_version
+            FROM metadata WHERE singleton = 1
+            """
         ).fetchone()
         if metadata is None:
             raise RuntimeError("NetworkMap database metadata is missing")
@@ -922,6 +967,8 @@ class StateStore:
         return {
             "revision": metadata["revision"],
             "updated_at": metadata["updated_at"],
+            "instance_id": metadata["instance_id"],
+            "api_version": metadata["api_version"],
             "nodes": [
                 self._load(row["data"])
                 for row in connection.execute("SELECT data FROM nodes ORDER BY rowid")
@@ -954,13 +1001,21 @@ class StateStore:
             connection = self._connect()
             try:
                 row = connection.execute(
-                    "SELECT revision, updated_at FROM metadata WHERE singleton = 1"
+                    """
+                    SELECT revision, updated_at, instance_id, api_version
+                    FROM metadata WHERE singleton = 1
+                    """
                 ).fetchone()
             finally:
                 self._close(connection)
         if row is None:
             raise RuntimeError("NetworkMap database metadata is missing")
-        return {"revision": int(row["revision"]), "updated_at": row["updated_at"]}
+        return {
+            "revision": int(row["revision"]),
+            "updated_at": row["updated_at"],
+            "instance_id": row["instance_id"],
+            "api_version": int(row["api_version"]),
+        }
 
     @staticmethod
     def _assert_revision(
@@ -1517,6 +1572,299 @@ def _origin_is_loopback(origin: str) -> bool:
     return _is_loopback_host(parsed.hostname.rstrip("."))
 
 
+class NativeSyncBridge:
+    """Exchange non-secret status and commands with the optional native sync worker."""
+
+    STATUS_STATES = {
+        "local-only",
+        "checking",
+        "synced",
+        "pushing",
+        "pulling",
+        "offline",
+        "auth-required",
+        "conflict",
+        "error",
+    }
+    ACTIONS = {"sync-now", "use-local", "use-hosted"}
+    MAX_FILE_BYTES = 64 * 1024
+
+    def __init__(self, data_dir: Path) -> None:
+        self.status_path = data_dir / SYNC_STATUS_FILENAME
+        self.command_path = data_dir / SYNC_COMMAND_FILENAME
+        self._command_lock = threading.Lock()
+
+    @staticmethod
+    def _default_status(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": API_VERSION,
+            "available": False,
+            "session_id": "",
+            "local_instance_id": metadata["instance_id"],
+            "mode": "server",
+            "state": "hosted",
+            "remote_url": "",
+            "message": "Hosted server is ready; native sync is not active.",
+            "pending_changes": 0,
+            "last_sync_at": "",
+            "can_resolve": False,
+            "heartbeat": None,
+            "local_revision": metadata["revision"],
+            "remote_revision": None,
+            "remote_instance_id": "",
+        }
+
+    @staticmethod
+    def _timestamp(value: Any, field: str) -> str:
+        result = _string(value, field, maximum=64)
+        if not result:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise validation_error(f"{field} must be an ISO 8601 timestamp", field) from exc
+        if parsed.tzinfo is None:
+            raise validation_error(f"{field} must include a timezone", field)
+        return result
+
+    @staticmethod
+    def _revision(value: Any, field: str, *, nullable: bool = False) -> int | None:
+        if nullable and value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise validation_error(f"{field} must be a non-negative integer", field)
+        return value
+
+    @staticmethod
+    def _remote_url(value: Any) -> str:
+        result = _string(value, "remote_url", maximum=2_048)
+        if not result:
+            return ""
+        if any(character.isspace() or ord(character) < 32 for character in result):
+            raise validation_error("remote_url cannot contain whitespace", "remote_url")
+        try:
+            parsed = urlsplit(result)
+            parsed.port
+        except ValueError as exc:
+            raise validation_error("remote_url is not a valid URL", "remote_url") from exc
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise validation_error(
+                "remote_url must be an HTTP(S) URL without credentials, query, or fragment",
+                "remote_url",
+            )
+        return urlunsplit(
+            (parsed.scheme.lower(), parsed.netloc, parsed.path, "", "")
+        )
+
+    @staticmethod
+    def _optional_uuid(value: Any, field: str) -> str:
+        result = _string(value, field, maximum=36)
+        if not result:
+            return ""
+        try:
+            return str(uuid.UUID(result))
+        except ValueError as exc:
+            raise validation_error(f"{field} must be a UUID", field) from exc
+
+    def _read_status_file(self) -> Any:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(self.status_path, flags)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > self.MAX_FILE_BYTES:
+                raise ValueError("sync status is not a small regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                data = source.read(self.MAX_FILE_BYTES + 1)
+            if len(data) > self.MAX_FILE_BYTES:
+                raise ValueError("sync status is too large")
+            return decode_json(data)
+        finally:
+            os.close(descriptor)
+
+    def _active_status(self, metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+        try:
+            raw = _require_object(self._read_status_file(), "sync status")
+            if (
+                type(raw.get("schema_version")) is not int
+                or raw["schema_version"] != API_VERSION
+            ):
+                return None
+            session_id = _identifier(raw.get("session_id"), "session_id")
+            local_instance_id = self._optional_uuid(
+                raw.get("local_instance_id"), "local_instance_id"
+            )
+            if local_instance_id != metadata["instance_id"]:
+                return None
+            if raw.get("mode") != "native-sync":
+                return None
+            state = _choice(raw.get("state"), "state", self.STATUS_STATES)
+            heartbeat = raw.get("heartbeat")
+            if (
+                isinstance(heartbeat, bool)
+                or not isinstance(heartbeat, (int, float))
+                or not math.isfinite(heartbeat)
+            ):
+                return None
+            now = time.time()
+            if (
+                heartbeat < now - SYNC_HEARTBEAT_MAX_AGE
+                or heartbeat > now + SYNC_HEARTBEAT_MAX_AGE
+            ):
+                return None
+            pending = raw.get("pending_changes", 0)
+            if (
+                isinstance(pending, bool)
+                or not isinstance(pending, int)
+                or not 0 <= pending <= 1_000_000
+            ):
+                return None
+            can_resolve = _boolean(raw.get("can_resolve", False), "can_resolve")
+            status: dict[str, Any] = {
+                "schema_version": API_VERSION,
+                "available": True,
+                "session_id": session_id,
+                "local_instance_id": local_instance_id,
+                "mode": "native-sync",
+                "state": state,
+                "remote_url": self._remote_url(raw.get("remote_url", "")),
+                "message": _string(raw.get("message", ""), "message", maximum=1_000),
+                "pending_changes": pending,
+                "last_sync_at": self._timestamp(
+                    raw.get("last_sync_at", ""), "last_sync_at"
+                ),
+                "can_resolve": can_resolve,
+                "heartbeat": heartbeat,
+            }
+            if "local_revision" in raw:
+                status["local_revision"] = self._revision(
+                    raw["local_revision"], "local_revision"
+                )
+            if "remote_revision" in raw:
+                status["remote_revision"] = self._revision(
+                    raw["remote_revision"], "remote_revision", nullable=True
+                )
+            if "remote_instance_id" in raw:
+                status["remote_instance_id"] = self._optional_uuid(
+                    raw["remote_instance_id"], "remote_instance_id"
+                )
+            if state == "conflict":
+                decision_id = raw.get("decision_id")
+                if isinstance(decision_id, str) and SYNC_DECISION_ID_RE.fullmatch(
+                    decision_id
+                ):
+                    status["decision_id"] = decision_id
+            return status
+        except (APIError, OSError, TypeError, ValueError):
+            return None
+
+    def get_status(self, metadata: Mapping[str, Any]) -> dict[str, Any]:
+        return self._active_status(metadata) or self._default_status(metadata)
+
+    def _write_command(self, command: Mapping[str, Any]) -> None:
+        data = json.dumps(
+            command, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+        temporary = self.command_path.with_name(
+            f"{self.command_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as target:
+                target.write(data)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, self.command_path)
+            os.chmod(self.command_path, 0o600)
+        finally:
+            os.close(descriptor)
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+
+    def request_action(
+        self,
+        action: Any,
+        metadata: Mapping[str, Any],
+        requested_decision_id: Any = None,
+    ) -> dict[str, Any]:
+        normalized_action = _string(
+            action, "action", maximum=20, allow_empty=False
+        )
+        if normalized_action not in self.ACTIONS:
+            raise validation_error(
+                "action must be one of: sync-now, use-hosted, use-local", "action"
+            )
+        status = self._active_status(metadata)
+        if status is None:
+            raise APIError(
+                "sync_unavailable",
+                "Native sync is not active on this server",
+                HTTPStatus.CONFLICT,
+            )
+        decision_id = ""
+        if normalized_action in {"use-local", "use-hosted"}:
+            decision_id = status.get("decision_id", "")
+            if (
+                not isinstance(requested_decision_id, str)
+                or not SYNC_DECISION_ID_RE.fullmatch(requested_decision_id)
+            ):
+                raise validation_error(
+                    "decision_id must identify the displayed sync conflict",
+                    "decision_id",
+                )
+            if (
+                status["state"] != "conflict"
+                or not status["can_resolve"]
+                or not decision_id
+                or not secrets.compare_digest(requested_decision_id, decision_id)
+            ):
+                raise APIError(
+                    "sync_resolution_unavailable",
+                    "A current, resolvable sync conflict is required for this action",
+                    HTTPStatus.CONFLICT,
+                )
+        elif requested_decision_id not in {None, ""}:
+            raise validation_error(
+                "decision_id is only valid for a conflict resolution",
+                "decision_id",
+            )
+        command = {
+            "schema_version": API_VERSION,
+            "command_id": str(uuid.uuid4()),
+            "action": normalized_action,
+            "session_id": status["session_id"],
+            "local_instance_id": status["local_instance_id"],
+            "decision_id": decision_id,
+            "requested_at": utc_now(),
+        }
+        with self._command_lock:
+            self._write_command(command)
+        return {
+            "accepted": True,
+            "action": normalized_action,
+            "command_id": command["command_id"],
+            "requested_at": command["requested_at"],
+        }
+
+
 class NetworkMapHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -1534,6 +1882,7 @@ class NetworkMapHTTPServer(ThreadingHTTPServer):
     ) -> None:
         self.store = store
         self.broker = broker
+        self.sync_bridge = NativeSyncBridge(store.database_path.parent)
         self.token = token.strip() if token and token.strip() else None
         self.static_dir = static_dir.resolve()
         self.display_host = display_host
@@ -1611,6 +1960,8 @@ class NetworkMapRequestHandler(BaseHTTPRequestHandler):
                     {
                         "status": "ok",
                         "version": VERSION,
+                        "api_version": state["api_version"],
+                        "instance_id": state["instance_id"],
                         "revision": state["revision"],
                         "updated_at": state["updated_at"],
                     }
@@ -1813,6 +2164,29 @@ class NetworkMapRequestHandler(BaseHTTPRequestHandler):
         store = self.app_server.store
         expected = self._expected_revision() if method in {"POST", "PUT", "PATCH", "DELETE"} else None
 
+        if path == "/api/sync/status":
+            if method not in {"GET", "HEAD"}:
+                raise self._method_not_allowed("GET, HEAD")
+            self._send_json(
+                self.app_server.sync_bridge.get_status(store.get_metadata())
+            )
+            return
+        if path == "/api/sync/actions":
+            if method != "POST":
+                raise self._method_not_allowed("POST")
+            body = _require_object(self._read_json())
+            _reject_unknown_fields(body, {"action", "decision_id"}, "sync action")
+            if "action" not in body:
+                raise validation_error("action is required", "action")
+            self._send_json(
+                self.app_server.sync_bridge.request_action(
+                    body["action"],
+                    store.get_metadata(),
+                    body.get("decision_id"),
+                ),
+                status=HTTPStatus.ACCEPTED,
+            )
+            return
         if path == "/api/state":
             if method in {"GET", "HEAD"}:
                 self._send_json(store.get_state())
@@ -2333,10 +2707,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "API_VERSION",
     "APIError",
     "DEFAULT_HOST",
     "DEFAULT_PORT",
     "EventBroker",
+    "NativeSyncBridge",
     "ServerThread",
     "StateStore",
     "VERSION",

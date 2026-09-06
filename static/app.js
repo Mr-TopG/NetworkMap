@@ -14,6 +14,8 @@
     activeView: "overview",
     activeConfigTab: "inventory",
     topologyEditing: false,
+    syncStatus: null,
+    syncStatusTimer: null,
     token: "",
     eventSource: null,
     eventRefreshTimer: null,
@@ -94,29 +96,26 @@
         if (["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password) return parsed.href;
       } catch (_) { /* invalid legacy value */ }
     }
-    const address = String(node?.hostname || node?.ip || "").trim();
+    if (nodeKind(node || {}) === "server") return "";
+    const address = String(node?.ip || node?.hostname || "").trim();
     if (!address) return "";
     const host = address.includes(":") && !address.startsWith("[") ? `[${address}]` : address;
     return `http://${host}/`;
   }
 
   function isMikrotik(node) {
-    const identity = [node?.vendor, node?.name, node?.hostname, ...(node?.tags || [])].join(" ");
-    return Boolean(node?.winbox_enabled || /mikrotik|routeros/i.test(identity));
+    return /mikrotik/i.test(String(node?.vendor || ""));
   }
 
   function winboxTarget(node) {
     return String(node?.ip || node?.mac || node?.hostname || "").trim();
   }
 
-  function openSelectedManagement() {
-    const node = nodeById(app.selectedNodeId);
-    const url = managementUrl(node);
-    if (!url) {
-      toast("No management address", "Add an IP, hostname, or HTTP(S) management URL in Edit topology.", "warning");
-      return;
-    }
-    window.open(url, "_blank", "noopener,noreferrer");
+  function sshUrl(node) {
+    if (nodeKind(node || {}) !== "server") return "";
+    const address = String(node?.ip || node?.hostname || "").trim();
+    if (!address) return "";
+    return `networkmap-ssh://connect/${encodeURIComponent(address)}`;
   }
 
   function openSelectedWinbox() {
@@ -153,7 +152,8 @@
     headers.set("Accept", "application/json");
     if (app.token) headers.set("Authorization", `Bearer ${app.token}`);
     if (requestOptions.body && !(requestOptions.body instanceof FormData)) headers.set("Content-Type", "application/json");
-    const stateMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method) && path !== "/api/discovery" && path !== "/api/session";
+    const stateMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method)
+      && !["/api/discovery", "/api/session", "/api/sync/actions"].includes(path);
     const revision = expectedRevision === undefined ? app.state.revision : expectedRevision;
     if (stateMutation && app.loaded && Number.isInteger(Number(revision))) headers.set("If-Match", `"${revision}"`);
     let response;
@@ -176,7 +176,7 @@
       const error = new Error(detail);
       error.status = response.status;
       error.details = payload?.error?.details;
-      if (response.status === 409) {
+      if (response.status === 409 && payload?.error?.code === "revision_conflict") {
         try {
           const latest = await api("/api/state");
           applyState(latest);
@@ -228,14 +228,114 @@
 
   function setConnection(connected) {
     app.connected = connected;
+    renderSyncStatus();
+  }
+
+  function syncRemoteLabel(value) {
+    if (!value) return "Not configured";
+    try {
+      const parsed = new URL(value);
+      return parsed.host || value;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  function syncTimeLabel(value) {
+    if (!value) return "Never";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Unknown" : relativeTime(date);
+  }
+
+  function renderSyncStatus() {
     const pill = $("#connectionPill");
-    pill.classList.toggle("connected", connected);
-    pill.classList.toggle("disconnected", !connected);
-    $("span:last-child", pill).textContent = connected ? "Live" : "Offline";
-    $("#syncLabel").textContent = connected ? "Changes synced" : "Connection lost";
-    $("#syncDetail").textContent = connected ? "Web & Linux clients" : "Trying to reconnect";
     const pulse = $(".pulse-dot");
-    pulse.classList.toggle("disconnected", !connected);
+    const workspaceDot = $("#workspaceStatusDot");
+    pill.classList.remove("connected", "disconnected", "warning");
+    pulse.classList.remove("disconnected", "warning");
+    workspaceDot.classList.remove("online", "offline", "unknown");
+    if (!app.connected) {
+      pill.classList.add("disconnected");
+      pulse.classList.add("disconnected");
+      workspaceDot.classList.add("offline");
+      $("span:last-child", pill).textContent = "Offline";
+      $("#workspaceMode").textContent = "Local workspace unavailable";
+      $("#syncLabel").textContent = "Connection lost";
+      $("#syncDetail").textContent = "Trying to reopen the workspace";
+      $("#syncCardTitle").textContent = "Workspace unavailable";
+      $("#syncCardDetail").textContent = "The local NetworkMap service is not responding.";
+      $("#syncNowButton").hidden = true;
+      $("#useHostedButton").hidden = true;
+      $("#useLocalButton").hidden = true;
+      $("#syncBackupNote").classList.add("hidden");
+      return;
+    }
+
+    const status = app.syncStatus || { mode: "server", state: "hosted" };
+    const state = status.state || "hosted";
+    const pending = Math.max(0, Number(status.pending_changes) || 0);
+    const views = {
+      hosted: ["Hosted", "Hosted server ready", "Shared server workspace", "Hosted workspace", "This server is ready for browser and Linux clients.", "ok"],
+      "local-only": ["Local", "Saved locally", "Hosted sync not configured", "Local-only workspace", "Connect a hosted server from the Linux app to synchronize this copy.", "ok"],
+      checking: ["Syncing", "Checking hosted server…", "Local editing remains available", "Checking hosted server", status.message || "Comparing the local and hosted copies.", "warning"],
+      synced: ["Synced", "Up to date", `Synchronized with ${syncRemoteLabel(status.remote_url)}`, "Copies are up to date", status.message || "Local and hosted topologies contain the same version.", "ok"],
+      pushing: ["Syncing", "Uploading local changes…", "The local copy stays available", "Uploading changes", status.message || "Publishing the local topology to the hosted server.", "warning"],
+      pulling: ["Syncing", "Updating local copy…", "The local copy stays available", "Getting hosted version", status.message || "Updating this computer from the hosted topology.", "warning"],
+      offline: ["Local", pending ? "Changes waiting" : "Working locally", "Hosted server is unavailable", "Working locally", status.message || "Changes are safe here and synchronization will retry automatically.", "warning"],
+      "auth-required": ["Attention", "Sign-in required", "Local changes are safe", "Hosted sign-in required", status.message || "Update the hosted server token and try again.", "error"],
+      conflict: ["Attention", "Sync needs attention", "Both copies changed", "Choose which copy to keep", status.message || "Nothing was overwritten because both topologies changed.", "error"],
+      error: ["Attention", "Synchronization paused", "Local changes are safe", "Could not synchronize", status.message || "Review the error and try again.", "error"]
+    };
+    const view = views[state] || views.error;
+    $("span:last-child", pill).textContent = view[0];
+    $("#syncLabel").textContent = view[1];
+    $("#syncDetail").textContent = view[2];
+    $("#syncCardTitle").textContent = pending && state === "offline" ? `${pending} ${pending === 1 ? "change" : "changes"} waiting` : view[3];
+    $("#syncCardDetail").textContent = view[4];
+    $("#workspaceMode").textContent = status.mode === "native-sync" ? (state === "synced" ? "Local copy · synchronized" : "Local copy") : "Hosted workspace";
+    const tone = view[5];
+    pill.classList.add(tone === "ok" ? "connected" : tone === "warning" ? "warning" : "disconnected");
+    if (tone === "warning") pulse.classList.add("warning");
+    else if (tone === "error") pulse.classList.add("disconnected");
+    workspaceDot.classList.add(tone === "ok" ? "online" : tone === "warning" ? "unknown" : "offline");
+    $("#syncRemote").textContent = syncRemoteLabel(status.remote_url);
+    $("#syncRemote").title = status.remote_url || "";
+    $("#syncLastRun").textContent = syncTimeLabel(status.last_sync_at);
+    const nativeSync = status.mode === "native-sync" && Boolean(status.remote_url);
+    const canResolve = nativeSync
+      && state === "conflict"
+      && status.can_resolve !== false
+      && /^[0-9a-f]{64}$/.test(String(status.decision_id || ""));
+    $("#syncNowButton").hidden = !nativeSync || ["checking", "pushing", "pulling", "conflict"].includes(state);
+    $("#useHostedButton").hidden = !canResolve;
+    $("#useLocalButton").hidden = !canResolve;
+    $("#syncBackupNote").classList.toggle("hidden", !canResolve);
+  }
+
+  async function fetchSyncStatus() {
+    try {
+      app.syncStatus = await api("/api/sync/status");
+    } catch (error) {
+      if (error.status === 404) app.syncStatus = { mode: "server", state: "hosted" };
+    }
+    renderSyncStatus();
+  }
+
+  async function requestSyncAction(action) {
+    const labels = { "sync-now": "Sync requested", "use-local": "Uploading local copy", "use-hosted": "Getting hosted copy" };
+    try {
+      const request = { action };
+      if (["use-local", "use-hosted"].includes(action)) {
+        request.decision_id = String(app.syncStatus?.decision_id || "");
+      }
+      await api("/api/sync/actions", { method: "POST", body: JSON.stringify(request) });
+      toast(labels[action] || "Sync requested", action === "sync-now" ? "NetworkMap will check both copies now." : "A backup will be created before either copy is replaced.");
+      app.syncStatus = { ...(app.syncStatus || {}), state: "checking", can_resolve: false, message: "Applying your synchronization choice." };
+      renderSyncStatus();
+      setTimeout(() => fetchSyncStatus().catch(() => {}), 1200);
+    } catch (error) {
+      reportError("Could not request synchronization", error);
+    }
   }
 
   function connectEvents() {
@@ -317,7 +417,7 @@
     document.title = `${name} · NetworkMap`;
     if (app.state.updated_at) {
       const date = new Date(app.state.updated_at);
-      $("#lastUpdated").textContent = Number.isNaN(date.getTime()) ? "Synced just now" : `Updated ${relativeTime(date)}`;
+      $("#lastUpdated").textContent = Number.isNaN(date.getTime()) ? "Saved just now" : `Saved ${relativeTime(date)}`;
     }
   }
 
@@ -687,13 +787,20 @@
     $("#inspectorName").textContent = node.name || "Unnamed device";
     $("#inspectorKind").textContent = titleCase(nodeKind(node));
     const state = $("#inspectorState"); state.textContent = node.status || "unknown"; state.className = `device-state ${node.status || "unknown"}`;
+    const mikrotik = isMikrotik(node);
+    const server = nodeKind(node) === "server";
     const webUrl = managementUrl(node);
-    const webButton = $("#openSelected");
-    webButton.disabled = !webUrl;
-    $("span", webButton).textContent = webUrl ? `Open ${webUrl.toLowerCase().startsWith("https://") ? "HTTPS" : "HTTP"}` : "No web address";
-    webButton.title = webUrl || "Edit this device to add a management address";
+    const webButton = $("#manageSelected");
+    webButton.hidden = !webUrl || mikrotik || server;
+    webButton.href = webUrl || "#";
+    webButton.title = webUrl ? `Manage at ${webUrl}` : "";
+    const sshButton = $("#sshSelected");
+    const serverSshUrl = sshUrl(node);
+    sshButton.hidden = !serverSshUrl;
+    sshButton.href = serverSshUrl || "#";
+    sshButton.title = serverSshUrl ? `Open an SSH session to ${node.ip || node.hostname}` : "";
     const winboxButton = $("#winboxSelected");
-    winboxButton.hidden = !isMikrotik(node) || !winboxTarget(node);
+    winboxButton.hidden = !mikrotik || !winboxTarget(node);
     winboxButton.title = winboxButton.hidden ? "" : `Open ${winboxTarget(node)} in MikroTik WinBox`;
     const detailValues = [
       ["IP address", node.ip ? `<code>${escapeHtml(node.ip)}</code>` : "—"],
@@ -823,7 +930,6 @@
     $("#nodeHostname").value = node?.hostname || "";
     $("#nodeVendor").value = node?.vendor || node?.config?.vendor_model || "";
     $("#nodeManagementUrl").value = node?.management_url || "";
-    $("#nodeWinboxEnabled").checked = Boolean(node?.winbox_enabled || (node && isMikrotik(node)));
     $("#nodeTags").value = Array.isArray(node?.tags) ? node.tags.join(", ") : "";
     $("#nodeNotes").value = node?.notes || "";
     const config = { ...(node?.config || {}) }; delete config.vendor_model;
@@ -851,7 +957,7 @@
     const payload = {
       name: $("#nodeName").value.trim(), kind: $("#nodeType").value, status: $("#nodeStatus").value,
       ip: $("#nodeIp").value.trim(), mac: $("#nodeMac").value.trim(), hostname: $("#nodeHostname").value.trim(),
-      vendor, management_url: $("#nodeManagementUrl").value.trim(), winbox_enabled: $("#nodeWinboxEnabled").checked,
+      vendor, management_url: $("#nodeManagementUrl").value.trim(),
       tags: $("#nodeTags").value.split(",").map(item => item.trim()).filter(Boolean), notes: $("#nodeNotes").value.trim(), config
     };
     if (!id) {
@@ -861,7 +967,7 @@
     try {
       const next = await api(id ? `/api/nodes/${encodeURIComponent(id)}` : "/api/nodes", { method: id ? "PATCH" : "POST", body: JSON.stringify(payload), expectedRevision: Number(form.dataset.baseRevision) });
       $("#nodeDialog").close(); applyState(next, { fit: !id });
-      toast(id ? "Device updated" : "Device added", `${payload.name} is synced to the workspace.`);
+      toast(id ? "Device updated" : "Device added", `${payload.name} was saved to the workspace.`);
       if (!id) {
         const created = [...next.nodes].reverse().find(node => node.name === payload.name) || next.nodes.at(-1);
         if (created) selectNode(created.id);
@@ -949,7 +1055,7 @@
     const form = event.currentTarget;
     const payload = { name: $("#settingName").value.trim() || "Main network", description: $("#settingDescription").value.trim(), subnet: $("#settingSubnet").value.trim(), refresh_interval: Number($("#settingRefresh").value), show_link_labels: $("#settingLinkLabels").checked, compact_labels: $("#settingCompact").checked };
     const button = $('button[type="submit"]', form); setBusy(button, true, "Saving…");
-    try { const next = await api("/api/settings", { method: "PATCH", body: JSON.stringify(payload), expectedRevision: Number(form.dataset.baseRevision) }); applyState(next); form.dataset.baseRevision = String(app.state.revision); $("#settingsHint").textContent = "Saved just now"; toast("Workspace updated", "Your preferences are synced."); }
+    try { const next = await api("/api/settings", { method: "PATCH", body: JSON.stringify(payload), expectedRevision: Number(form.dataset.baseRevision) }); applyState(next); form.dataset.baseRevision = String(app.state.revision); $("#settingsHint").textContent = "Saved just now"; toast("Workspace updated", "Your preferences were saved."); }
     catch (error) { reportError("Could not save settings", error); }
     finally { setBusy(button, false); }
   }
@@ -1080,13 +1186,15 @@
     $("#nodeForm").addEventListener("submit", submitNode);
     $("#linkForm").addEventListener("submit", submitLink);
     $("#settingsForm").addEventListener("submit", submitSettings);
+    $("#syncNowButton").addEventListener("click", () => requestSyncAction("sync-now"));
+    $("#useHostedButton").addEventListener("click", () => requestSyncAction("use-hosted"));
+    $("#useLocalButton").addEventListener("click", () => requestSyncAction("use-local"));
     $("#inventorySearch").addEventListener("input", renderDeviceTable);
     $("#statusFilter").addEventListener("change", renderDeviceTable);
     $("#deviceTableBody").addEventListener("click", handleDeviceTableClick);
     $("#linkTableBody").addEventListener("click", handleLinkTableClick);
     $("#mapSearch").addEventListener("input", applyMapSearch);
     $("#closeInspector").addEventListener("click", clearSelection);
-    $("#openSelected").addEventListener("click", openSelectedManagement);
     $("#winboxSelected").addEventListener("click", openSelectedWinbox);
     $("#editSelected").addEventListener("click", () => openNodeDialog(app.selectedNodeId));
     $("#deleteSelected").addEventListener("click", () => confirmDeleteNode(app.selectedNodeId));
@@ -1125,7 +1233,7 @@
       finally { setBusy(button, false); }
     });
     window.addEventListener("resize", () => { if (app.activeView === "overview" && app.state.nodes.length) fitMap(); });
-    window.addEventListener("beforeunload", closeEvents);
+    window.addEventListener("beforeunload", () => { closeEvents(); clearInterval(app.syncStatusTimer); });
   }
 
   async function loadInitialState() {
@@ -1133,13 +1241,14 @@
       try { await api("/api/session", { method: "POST" }); forgetBootstrapToken(); }
       catch (error) { if (error.status !== 401) reportError("Could not establish session", error); return; }
     }
-    fetchState({ fit: true }).catch(() => {});
+    fetchState({ fit: true }).then(() => fetchSyncStatus()).catch(() => {});
   }
 
   function init() {
-    readInitialToken(); restoreTheme(); attachEvents(); renderAll();
+    readInitialToken(); restoreTheme(); attachEvents(); renderAll(); renderSyncStatus();
     setTopologyEditing(false);
     loadInitialState();
+    app.syncStatusTimer = setInterval(() => fetchSyncStatus().catch(() => {}), 4000);
     if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/static/sw.js").catch(() => {});
   }
 

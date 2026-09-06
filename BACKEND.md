@@ -32,6 +32,8 @@ httpd = create_server(port=8765)  # bound, but not started
 
 ```json
 {
+  "api_version": 1,
+  "instance_id": "621ff6cc-6374-4af9-9da7-fcd71ea83390",
   "revision": 3,
   "updated_at": "2026-09-05T17:30:00.000Z",
   "nodes": [],
@@ -43,7 +45,9 @@ httpd = create_server(port=8765)  # bound, but not started
 A node has `id`, `name`, `kind`, `ip`, `mac`, `hostname`, `vendor`,
 `management_url`, `winbox_enabled`, `status`, `x`, `y`, `notes`, `tags`, and
 `config`. `management_url` is empty or an HTTP(S) URL without embedded
-credentials. A link has `id`, `source`, `target`, `name`, `kind`, `status`,
+credentials. `winbox_enabled` remains accepted for backup compatibility, but
+the current UI detects WinBox support from `MikroTik` in the vendor field. A
+link has `id`, `source`, `target`, `name`, `kind`, `status`,
 `directed`, `bandwidth_mbps`, `notes`, and `config`.
 The `source` and `target` values are node IDs. The backend accepts `label` as a
 legacy input alias for link `name`, but always emits `name`.
@@ -56,6 +60,13 @@ Every mutation is atomic, increments `revision`, and returns the complete new
 state. Clients may send the ETag received from `GET /api/state` as `If-Match`.
 A stale revision returns HTTP 409 without changing anything.
 
+`instance_id` permanently identifies the database, while `api_version` gates
+safe native synchronization. Importing a backup never replaces either value.
+The native worker compares topology content against a durable common baseline;
+it does not treat unrelated revision numbers or timestamps as ordering. A
+conflict choice is bound to the exact local and hosted snapshots shown to the
+user, so a later edit invalidates the choice instead of being overwritten.
+
 ## Routes
 
 | Method | Route | Result |
@@ -63,6 +74,8 @@ A stale revision returns HTTP 409 without changing anything.
 | GET | `/api/health` | Public readiness, version, and revision |
 | GET | `/api/state` | Complete current state |
 | PUT | `/api/state` | Validate and replace nodes, links, and settings |
+| GET | `/api/sync/status` | Secret-free native synchronization status, or hosted-only status |
+| POST | `/api/sync/actions` | Ask the active native worker to sync or resolve its current conflict |
 | GET, POST | `/api/nodes` | List or create nodes |
 | GET, PATCH, DELETE | `/api/nodes/{id}` | Read, edit, or delete a node; deletion cascades its links |
 | GET, POST | `/api/links` | List links or create one between existing nodes |
@@ -75,6 +88,12 @@ A stale revision returns HTTP 409 without changing anything.
 | POST | `/api/discovery` | Return reviewable local discovery candidates |
 | GET | `/api/demo` | Return the built-in sample without changing state |
 | POST | `/api/demo/reset` | Replace state with the editable sample topology |
+
+Request an immediate comparison with `{"action":"sync-now"}`. Conflict
+resolutions use `{"action":"use-local","decision_id":"..."}` or
+`{"action":"use-hosted","decision_id":"..."}`, where `decision_id` is the
+current value returned by `/api/sync/status`. A missing or stale decision ID is
+rejected without changing either topology.
 
 Discovery accepts `{"cidr":"192.168.1.0/24","use_nmap":false}`. It runs
 `ip neigh` and, only when requested and installed, `nmap -sn` (plus `-6` for
@@ -96,3 +115,7 @@ cookie. The legacy `/?token=TOKEN` redirect remains for compatibility and its
 value is redacted from built-in access logs. The backend does not enable
 cross-origin access or trust proxy headers. Use a TLS reverse proxy and firewall
 rather than exposing the process directly to the Internet.
+
+The offline-first native worker uses the same bearer token for hosted API calls,
+but never writes it to its checkpoint, status, command, backup, or remembered-URL
+files.
