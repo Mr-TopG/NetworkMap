@@ -191,6 +191,8 @@
     const isHidden = Boolean(hidden);
     $("#appShell").classList.toggle("topbar-hidden", isHidden);
     $("#topbar").hidden = isHidden;
+    $("#overviewHeading").hidden = isHidden;
+    $("#networkSummary").hidden = isHidden;
     $("#topbarShowButton").hidden = !isHidden;
     if (persist) storeLayoutPreference("networkmap_topbar_hidden", isHidden);
     if (focusControl) (isHidden ? $("#topbarShowButton") : $("#topbarHideButton")).focus();

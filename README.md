@@ -13,7 +13,8 @@ Python or JavaScript dependencies. The Linux window uses the GTK 3 and WebKitGTK
 
 - Locked-by-default topology with pan, zoom, fit-to-view, search, and an explicit
   edit mode for dragging nodes or changing links
-- Collapsible left navigation and a hideable header, remembered on this browser
+- Collapsible left navigation and a hide control for the header, overview heading,
+  and summary cards, remembered on this browser; the map expands into the freed space
 - A device inspector that opens only when a map device is selected
 - Click-through device inspector with reliable HTTP/HTTPS management links
 - One-click SSH terminal launch for mapped servers in the Linux app

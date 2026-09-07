@@ -72,17 +72,17 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>
             <span>Scan network</span>
           </button>
-          <button class="icon-btn" id="topbarHideButton" type="button" aria-label="Hide header" aria-controls="topbar" title="Hide header">
+          <button class="icon-btn" id="topbarHideButton" type="button" aria-label="Hide header and network summary" aria-controls="topbar overviewHeading networkSummary" title="Hide header and network summary">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></svg>
           </button>
         </div>
       </header>
-      <button class="icon-btn topbar-reveal-button" id="topbarShowButton" type="button" aria-label="Show header" aria-controls="topbar" title="Show header" hidden>
+      <button class="icon-btn topbar-reveal-button" id="topbarShowButton" type="button" aria-label="Show header and network summary" aria-controls="topbar overviewHeading networkSummary" title="Show header and network summary" hidden>
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></svg>
       </button>
 
       <section class="view active" id="overviewView" data-view-panel="overview" aria-labelledby="overviewTitle">
-        <div class="page-heading">
+        <div class="page-heading" id="overviewHeading">
           <div>
             <div class="eyebrow">NETWORK OVERVIEW</div>
             <h1 id="overviewTitle">Your network, at a glance</h1>
@@ -91,7 +91,7 @@
           <div class="updated-label"><span class="status-dot online"></span><span id="lastUpdated">Awaiting first sync</span></div>
         </div>
 
-        <div class="stat-grid" aria-label="Network summary">
+        <div class="stat-grid" id="networkSummary" aria-label="Network summary">
           <article class="stat-card accent-blue">
             <div class="stat-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
             <div><small>Total devices</small><strong id="statDevices">—</strong><span id="statDevicesHint">Loading inventory</span></div>
