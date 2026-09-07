@@ -40,7 +40,7 @@ import uuid
 import xml.etree.ElementTree as ET
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 API_VERSION = 1
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765

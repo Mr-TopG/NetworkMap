@@ -342,7 +342,7 @@ class HTTPTests(unittest.TestCase):
         status, health, _ = self.request("/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(health["status"], "ok")
-        self.assertEqual(health["version"], "0.2.0")
+        self.assertEqual(health["version"], "0.2.1")
         self.assertEqual(health["api_version"], 1)
         uuid.UUID(health["instance_id"])
         status, state, headers = self.request("/api/state")

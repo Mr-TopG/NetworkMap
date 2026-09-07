@@ -20,6 +20,7 @@
     eventSource: null,
     eventRefreshTimer: null,
     refreshTimer: null,
+    layoutFitTimer: null,
     visualPositions: new Map(),
     transform: { x: 0, y: 0, scale: 1 },
     interaction: null,
@@ -143,6 +144,51 @@
     $$(".topology-edit-only").forEach(element => { element.hidden = !app.topologyEditing; });
     $("#mapTip").textContent = app.topologyEditing ? "Edit mode · Drag nodes or select links" : "View mode · Click a device to inspect";
     if (app.loaded) { renderMap(); renderInspector(); }
+  }
+
+  function scheduleMapFit(delay = 0) {
+    clearTimeout(app.layoutFitTimer);
+    if (!app.loaded || app.activeView !== "overview" || !app.state.nodes.length) return;
+    app.layoutFitTimer = setTimeout(() => {
+      app.layoutFitTimer = null;
+      fitMap();
+    }, delay);
+  }
+
+  function storeLayoutPreference(key, value) {
+    try { localStorage.setItem(key, value ? "1" : "0"); } catch (_) { /* unavailable */ }
+  }
+
+  function setSidebarCollapsed(collapsed, { persist = true } = {}) {
+    const isCollapsed = Boolean(collapsed);
+    $("#appShell").classList.toggle("sidebar-collapsed", isCollapsed);
+    const button = $("#sidebarCollapseButton");
+    button.setAttribute("aria-expanded", String(!isCollapsed));
+    button.setAttribute("aria-label", isCollapsed ? "Expand navigation" : "Collapse navigation");
+    button.title = isCollapsed ? "Expand navigation" : "Collapse navigation";
+    if (persist) storeLayoutPreference("networkmap_sidebar_collapsed", isCollapsed);
+    scheduleMapFit(280);
+  }
+
+  function setTopbarHidden(hidden, { persist = true, focusControl = false } = {}) {
+    const isHidden = Boolean(hidden);
+    $("#appShell").classList.toggle("topbar-hidden", isHidden);
+    $("#topbar").hidden = isHidden;
+    $("#topbarShowButton").hidden = !isHidden;
+    if (persist) storeLayoutPreference("networkmap_topbar_hidden", isHidden);
+    if (focusControl) (isHidden ? $("#topbarShowButton") : $("#topbarHideButton")).focus();
+    scheduleMapFit();
+  }
+
+  function restoreLayout() {
+    let sidebarCollapsed = false;
+    let topbarHidden = false;
+    try {
+      sidebarCollapsed = localStorage.getItem("networkmap_sidebar_collapsed") === "1";
+      topbarHidden = localStorage.getItem("networkmap_topbar_hidden") === "1";
+    } catch (_) { /* unavailable */ }
+    setSidebarCollapsed(sidebarCollapsed, { persist: false });
+    setTopbarHidden(topbarHidden, { persist: false });
   }
 
   async function api(path, options = {}) {
@@ -768,20 +814,23 @@
     app.selectedNodeId = String(id);
     renderMap();
     renderInspector();
-    $("#inspector").classList.add("has-selection");
   }
 
   function clearSelection() {
     app.selectedNodeId = null;
     app.selectedLinkId = null;
     renderMap(); renderInspector();
-    $("#inspector").classList.remove("has-selection");
   }
 
   function renderInspector() {
     const node = nodeById(app.selectedNodeId);
-    $("#inspectorPlaceholder").classList.toggle("hidden", Boolean(node));
-    $("#inspectorContent").classList.toggle("hidden", !node);
+    const inspector = $("#inspector");
+    const wasVisible = !inspector.hidden;
+    const visible = Boolean(node);
+    inspector.hidden = !visible;
+    inspector.classList.toggle("has-selection", visible);
+    $("#overviewGrid").classList.toggle("has-inspector", visible);
+    if (wasVisible !== visible) scheduleMapFit();
     if (!node) return;
     $("#inspectorAvatar").innerHTML = iconMarkup(nodeKind(node));
     $("#inspectorName").textContent = node.name || "Unnamed device";
@@ -894,7 +943,7 @@
     const label = $("#jsonValidity");
     try {
       const parsed = JSON.parse($("#rawJson").value);
-      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.links) || typeof parsed.settings !== "object") throw new Error("Expected nodes, links, and settings");
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.links) || !parsed.settings || Array.isArray(parsed.settings) || typeof parsed.settings !== "object") throw new Error("Expected nodes, links, and settings");
       label.textContent = "Valid JSON"; label.classList.remove("invalid"); return parsed;
     } catch (error) {
       label.textContent = error.message; label.classList.add("invalid"); return null;
@@ -1023,29 +1072,30 @@
     finally { setBusy(submit, false); }
   }
 
-  function askConfirmation({ title, message, label = "Remove", action }) {
+  function askConfirmation({ title, message, label = "Remove", busyLabel = "Working…", action }) {
     $("#confirmTitle").textContent = title; $("#confirmMessage").textContent = message; $("#confirmButton").textContent = label;
+    $("#confirmButton").dataset.busyLabel = busyLabel;
     app.confirmAction = action; $("#confirmDialog").returnValue = ""; $("#confirmDialog").showModal();
   }
 
   function confirmDeleteNode(id) {
     const node = nodeById(id); if (!node) return;
     const links = app.state.links.filter(link => String(endpointId(link, "source")) === String(id) || String(endpointId(link, "target")) === String(id)).length;
-    askConfirmation({ title: `Remove ${node.name}?`, message: links ? `This also removes ${links} connected ${links === 1 ? "link" : "links"}. This action cannot be undone.` : "This device will be permanently removed from the map.", action: async () => {
+    askConfirmation({ title: `Remove ${node.name}?`, message: links ? `This also removes ${links} connected ${links === 1 ? "link" : "links"}. This action cannot be undone.` : "This device will be permanently removed from the map.", busyLabel: "Removing…", action: async () => {
       const next = await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" }); applyState(next); clearSelection(); toast("Device removed", `${node.name} was removed from the workspace.`);
     }});
   }
 
   function confirmDeleteLink(id) {
     const link = linkById(id); if (!link) return;
-    askConfirmation({ title: "Remove connection?", message: "The devices will remain on the map, but this connection will be removed.", action: async () => {
+    askConfirmation({ title: "Remove connection?", message: "The devices will remain on the map, but this connection will be removed.", busyLabel: "Removing…", action: async () => {
       const next = await api(`/api/links/${encodeURIComponent(id)}`, { method: "DELETE" }); applyState(next); toast("Connection removed", "The topology has been updated.");
     }});
   }
 
   async function runConfirmedAction() {
     const action = app.confirmAction; app.confirmAction = null; if (!action) return;
-    const button = $("#confirmButton"); setBusy(button, true, "Removing…");
+    const button = $("#confirmButton"); setBusy(button, true, button.dataset.busyLabel || "Working…");
     try { await action(); } catch (error) { reportError("Action failed", error); }
     finally { setBusy(button, false); }
   }
@@ -1067,21 +1117,27 @@
 
   async function saveRawJson() {
     const parsed = validateRawJson(); if (!parsed) { toast("Invalid JSON", "Fix the highlighted JSON error before saving.", "error"); return; }
-    askConfirmation({ title: "Replace this workspace?", message: "All current devices, connections, and settings will be replaced by the JSON editor contents.", label: "Replace workspace", action: () => replaceState(parsed, "The JSON configuration is now active.", app.rawBaseRevision) });
+    askConfirmation({ title: "Replace this workspace?", message: "All current devices, connections, and settings will be replaced by the JSON editor contents.", label: "Replace workspace", busyLabel: "Replacing…", action: () => replaceState(parsed, "The JSON configuration is now active.", app.rawBaseRevision) });
+  }
+
+  async function importState(payload, successMessage, expectedRevision = app.state.revision) {
+    const next = await api("/api/import", { method: "POST", body: JSON.stringify(payload), expectedRevision });
+    app.rawDirty = false; applyState(next, { fit: true }); toast("Workspace imported", successMessage);
   }
 
   async function importFile(file) {
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text());
-      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.links) || typeof parsed.settings !== "object") throw new Error("This is not a valid NetworkMap workspace file.");
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.links) || !parsed.settings || Array.isArray(parsed.settings) || typeof parsed.settings !== "object") throw new Error("This is not a valid NetworkMap workspace file.");
       const baseRevision = app.state.revision;
-      askConfirmation({ title: "Import this workspace?", message: `Import ${parsed.nodes.length} devices and ${parsed.links.length} connections, replacing the current map?`, label: "Import workspace", action: () => replaceState(parsed, `${parsed.nodes.length} devices and ${parsed.links.length} connections were loaded.`, baseRevision) });
+      askConfirmation({ title: "Import this workspace?", message: `Import ${parsed.nodes.length} devices and ${parsed.links.length} connections, replacing the current map?`, label: "Import workspace", busyLabel: "Importing…", action: () => importState(parsed, `${parsed.nodes.length} devices and ${parsed.links.length} connections were loaded.`, baseRevision) });
     } catch (error) { reportError("Could not import file", error); }
     finally { $("#importFile").value = ""; }
   }
 
   async function exportState() {
+    $("#topologyDataMenu").removeAttribute("open");
     try {
       let payload;
       try { payload = await api("/api/export"); } catch (error) { if (error.status === 404) payload = serializableState(); else throw error; }
@@ -1205,6 +1261,9 @@
     $("#fitMap").addEventListener("click", () => fitMap());
     $("#mapMenuButton").addEventListener("click", autoLayout);
     $("#topologyEditButton").addEventListener("click", () => setTopologyEditing(!app.topologyEditing));
+    $("#sidebarCollapseButton").addEventListener("click", () => setSidebarCollapsed(!$("#appShell").classList.contains("sidebar-collapsed")));
+    $("#topbarHideButton").addEventListener("click", () => setTopbarHidden(true, { focusControl: true }));
+    $("#topbarShowButton").addEventListener("click", () => setTopbarHidden(false, { focusControl: true }));
     $("#openConfigurationButton").addEventListener("click", () => { switchView("configuration"); switchConfigTab("inventory"); });
     const topology = $("#topology");
     topology.addEventListener("pointerdown", startPan); topology.addEventListener("pointermove", movePointer); topology.addEventListener("pointerup", endPointer); topology.addEventListener("pointercancel", endPointer);
@@ -1217,8 +1276,8 @@
     $("#rawJson").addEventListener("keydown", event => { if (event.key === "Tab") { event.preventDefault(); const field = event.currentTarget; const start = field.selectionStart; field.setRangeText("  ", start, field.selectionEnd, "end"); field.dispatchEvent(new Event("input")); } });
     $("#saveJsonButton").addEventListener("click", saveRawJson);
     $("#copyJsonButton").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("#rawJson").value); toast("Copied to clipboard", "Workspace JSON is ready to paste."); } catch (_) { $("#rawJson").select(); document.execCommand("copy"); toast("Copied to clipboard"); } });
-    $("#exportButton").addEventListener("click", exportState);
-    $("#importButton").addEventListener("click", () => $("#importFile").click());
+    $$('[data-action="export-topology"]').forEach(button => button.addEventListener("click", exportState));
+    $$('[data-action="import-topology"]').forEach(button => button.addEventListener("click", () => { $("#topologyDataMenu").removeAttribute("open"); $("#importFile").click(); }));
     $("#importFile").addEventListener("change", event => importFile(event.target.files[0]));
     $("#discoveryForm").addEventListener("submit", handleDiscoverySubmit);
     $("#discoveryList").addEventListener("change", () => { $("#discoverySubmit").textContent = `Add selected (${selectedDiscoveryCount()})`; });
@@ -1232,8 +1291,10 @@
       catch (error) { if (error.status !== 401) toast("Connection failed", error.message, "error"); }
       finally { setBusy(button, false); }
     });
-    window.addEventListener("resize", () => { if (app.activeView === "overview" && app.state.nodes.length) fitMap(); });
-    window.addEventListener("beforeunload", () => { closeEvents(); clearInterval(app.syncStatusTimer); });
+    document.addEventListener("click", event => { const menu = $("#topologyDataMenu"); if (menu.open && !menu.contains(event.target)) menu.removeAttribute("open"); });
+    document.addEventListener("keydown", event => { if (event.key !== "Escape") return; $("#topologyDataMenu").removeAttribute("open"); if ($("#appShell").classList.contains("nav-open")) { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); $("#menuButton").focus(); } });
+    window.addEventListener("resize", () => { if (window.innerWidth > 930) { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); } if (app.activeView === "overview" && app.state.nodes.length) fitMap(); });
+    window.addEventListener("beforeunload", () => { closeEvents(); clearInterval(app.syncStatusTimer); clearTimeout(app.layoutFitTimer); });
   }
 
   async function loadInitialState() {
@@ -1245,7 +1306,7 @@
   }
 
   function init() {
-    readInitialToken(); restoreTheme(); attachEvents(); renderAll(); renderSyncStatus();
+    readInitialToken(); restoreTheme(); restoreLayout(); attachEvents(); renderAll(); renderSyncStatus();
     setTopologyEditing(false);
     loadInitialState();
     app.syncStatusTimer = setInterval(() => fetchSyncStatus().catch(() => {}), 4000);

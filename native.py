@@ -39,7 +39,7 @@ from networkmap_sync import SyncWorker
 
 APP_NAME = "NetworkMap"
 APP_ID = "io.github.networkmap.NetworkMap"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 APP_DIR = Path(__file__).resolve().parent

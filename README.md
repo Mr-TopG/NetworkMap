@@ -13,6 +13,8 @@ Python or JavaScript dependencies. The Linux window uses the GTK 3 and WebKitGTK
 
 - Locked-by-default topology with pan, zoom, fit-to-view, search, and an explicit
   edit mode for dragging nodes or changing links
+- Collapsible left navigation and a hideable header, remembered on this browser
+- A device inspector that opens only when a map device is selected
 - Click-through device inspector with reliable HTTP/HTTPS management links
 - One-click SSH terminal launch for mapped servers in the Linux app
 - Automatic MikroTik vendor detection and WinBox launch, with a copy-address fallback
@@ -307,9 +309,11 @@ on networks you own or are authorized to assess.
 
 ## Backups and restore
 
-Use **Configuration → Data & backup → Export** for a consistent JSON snapshot.
+Use **Topology file → Export topology** directly above the map, or
+**Configuration → Data & backup → Export**, for a consistent JSON snapshot.
 The matching Import action validates the entire document and atomically replaces
-devices, links, and settings. Export before a large edit or import.
+devices, links, and settings after confirmation. Export before a large edit or
+import.
 
 The same operation is available to automation:
 

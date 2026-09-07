@@ -14,11 +14,14 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="app-shell" id="appShell">
     <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <button class="icon-btn sidebar-collapse-button" id="sidebarCollapseButton" type="button" aria-label="Collapse navigation" aria-controls="sidebar" aria-expanded="true" title="Collapse navigation">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></svg>
+      </button>
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32"><path d="M9 8.5 16 4l7 4.5v8L16 21l-7-4.5z"/><path d="M9 16.5v7L16 28l7-4.5v-7M16 21v7"/></svg>
         </span>
-        <span><strong>NetworkMap</strong><small>Network workspace</small></span>
+        <span class="brand-copy"><strong>NetworkMap</strong><small>Network workspace</small></span>
       </div>
 
       <div class="workspace-chip" aria-label="Current workspace">
@@ -28,11 +31,11 @@
       </div>
 
       <nav class="primary-nav">
-        <button class="nav-item active" data-view="overview" aria-current="page">
+        <button class="nav-item active" data-view="overview" aria-label="Overview" title="Overview" aria-current="page">
           <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M10.6 7.1 6.5 15.8M13.4 7.1l4.1 8.7M7.5 18h9"/></svg>
           <span>Overview</span>
         </button>
-        <button class="nav-item" data-view="configuration">
+        <button class="nav-item" data-view="configuration" aria-label="Configuration" title="Configuration">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/><circle cx="9" cy="5" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="19" r="2"/></svg>
           <span>Configuration</span>
         </button>
@@ -49,14 +52,14 @@
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20.5 15.2A8 8 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2Z"/></svg>
           <span>Appearance</span>
         </button>
-        <span class="version">v0.2.0</span>
+        <span class="version">v0.2.1</span>
       </div>
     </aside>
 
     <button class="sidebar-scrim" id="sidebarScrim" aria-label="Close navigation"></button>
 
     <main class="main" id="main-content">
-      <header class="topbar">
+      <header class="topbar" id="topbar">
         <div class="topbar-leading">
           <button class="icon-btn menu-button" id="menuButton" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -69,8 +72,14 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>
             <span>Scan network</span>
           </button>
+          <button class="icon-btn" id="topbarHideButton" type="button" aria-label="Hide header" aria-controls="topbar" title="Hide header">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></svg>
+          </button>
         </div>
       </header>
+      <button class="icon-btn topbar-reveal-button" id="topbarShowButton" type="button" aria-label="Show header" aria-controls="topbar" title="Show header" hidden>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6"/></svg>
+      </button>
 
       <section class="view active" id="overviewView" data-view-panel="overview" aria-labelledby="overviewTitle">
         <div class="page-heading">
@@ -101,7 +110,7 @@
           </article>
         </div>
 
-        <div class="overview-grid">
+        <div class="overview-grid" id="overviewGrid">
           <article class="panel map-panel">
             <header class="panel-header map-header">
               <div>
@@ -113,6 +122,16 @@
                   <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2Z"/></svg>
                   <span>Edit topology</span>
                 </button>
+                <details class="topology-data-menu" id="topologyDataMenu">
+                  <summary class="button secondary compact" aria-label="Import or export topology" title="Import or export topology">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 3h9l3 3v15H6Z"/><path d="M15 3v4h4M9 12h6M12 9v6"/></svg>
+                    <span>Topology file</span>
+                  </summary>
+                  <div class="topology-data-popover" role="menu" aria-label="Topology file actions">
+                    <button type="button" role="menuitem" data-action="export-topology"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span><strong>Export topology</strong><small>Download the current map as JSON</small></span></button>
+                    <button type="button" role="menuitem" data-action="import-topology"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M5 3h14"/></svg><span><strong>Import topology</strong><small>Replace the map from a JSON backup</small></span></button>
+                  </div>
+                </details>
                 <label class="search-field map-search">
                   <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
                   <span class="sr-only">Search map</span>
@@ -159,14 +178,8 @@
             </div>
           </article>
 
-          <aside class="panel inspector" id="inspector" aria-label="Device inspector">
-            <div class="inspector-placeholder" id="inspectorPlaceholder">
-              <div class="placeholder-orbit" aria-hidden="true"><span></span><i></i><i></i><i></i></div>
-              <h2>Select a device</h2>
-              <p>Choose any device on the map to view its details and configuration.</p>
-              <kbd>Click a node</kbd>
-            </div>
-            <div class="inspector-content hidden" id="inspectorContent">
+          <aside class="panel inspector" id="inspector" aria-label="Selected device" hidden>
+            <div class="inspector-content" id="inspectorContent">
               <header class="inspector-header">
                 <div class="device-avatar large" id="inspectorAvatar"></div>
                 <div class="inspector-title"><div class="device-state" id="inspectorState"></div><h2 id="inspectorName"></h2><span id="inspectorKind"></span></div>
@@ -269,11 +282,11 @@
         <div class="config-panel data-layout" id="dataPanel" role="tabpanel" aria-labelledby="dataTab" hidden>
           <article class="panel data-card">
             <div class="data-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></div>
-            <div><h2>Export workspace</h2><p>Download your complete topology as a portable JSON backup.</p><button class="button secondary" id="exportButton">Download JSON</button></div>
+            <div><h2>Export workspace</h2><p>Download your complete topology as a portable JSON backup.</p><button class="button secondary" id="exportButton" type="button" data-action="export-topology">Download JSON</button></div>
           </article>
           <article class="panel data-card">
             <div class="data-icon violet"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 21V9M7 14l5-5 5 5M5 3h14"/></svg></div>
-            <div><h2>Import workspace</h2><p>Replace this workspace with a previously exported NetworkMap file.</p><button class="button secondary" id="importButton">Choose JSON file</button><input id="importFile" class="sr-only" type="file" accept="application/json,.json"></div>
+            <div><h2>Import workspace</h2><p>Replace this workspace with a previously exported NetworkMap file.</p><button class="button secondary" id="importButton" type="button" data-action="import-topology">Choose JSON file</button></div>
           </article>
           <article class="panel raw-data-card">
             <header class="panel-header"><div><h2>Raw JSON editor</h2><span>For advanced users — validates before saving</span></div><button class="button ghost compact" id="copyJsonButton">Copy JSON</button></header>
@@ -284,6 +297,8 @@
       </section>
     </main>
   </div>
+
+  <input id="importFile" class="sr-only" type="file" accept="application/json,.json" aria-label="Choose a NetworkMap topology file">
 
   <dialog class="modal" id="nodeDialog" aria-labelledby="nodeDialogTitle">
     <form method="dialog" id="nodeForm">
