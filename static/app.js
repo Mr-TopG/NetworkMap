@@ -21,6 +21,9 @@
     eventRefreshTimer: null,
     refreshTimer: null,
     layoutFitTimer: null,
+    nodeIndex: new Map(),
+    linkIndex: new Map(),
+    linksByNode: new Map(),
     visualPositions: new Map(),
     transform: { x: 0, y: 0, scale: 1 },
     interaction: null,
@@ -29,6 +32,7 @@
     discoveryResults: [],
     confirmAction: null
   };
+  const svgIconTemplates = new Map();
 
   const deviceIcons = {
     router: '<circle cx="0" cy="0" r="9"/><path d="M-5 0h10M0-5v10M-5 0l2-2M-5 0l2 2M5 0 3-2M5 0l3 2M0-5l-2 2M0-5l2 2"/>',
@@ -84,10 +88,23 @@
   function nodeKind(node) { return node.kind || node.type || "other"; }
   function linkKind(link) { return link.kind || link.type || "other"; }
   function linkName(link) { return link.name || link.label || ""; }
-  function nodeById(id) { return app.state.nodes.find(node => String(node.id) === String(id)); }
-  function linkById(id) { return app.state.links.find(link => String(link.id) === String(id)); }
+  function nodeById(id) { return app.nodeIndex.get(String(id)); }
+  function linkById(id) { return app.linkIndex.get(String(id)); }
+  function linksForNode(id) { return app.linksByNode.get(String(id)) || []; }
   function endpointId(link, end) { return link[end] ?? link[`${end}_id`] ?? ""; }
   function linkUiStatus(status) { return status === "active" || status === "online" ? "online" : status === "inactive" || status === "offline" ? "offline" : status === "degraded" ? "degraded" : "unknown"; }
+
+  function rebuildStateIndexes() {
+    app.nodeIndex = new Map(app.state.nodes.map(node => [String(node.id), node]));
+    app.linkIndex = new Map(app.state.links.map(link => [String(link.id), link]));
+    app.linksByNode = new Map(app.state.nodes.map(node => [String(node.id), []]));
+    app.state.links.forEach(link => {
+      const source = String(endpointId(link, "source"));
+      const target = String(endpointId(link, "target"));
+      app.linksByNode.get(source)?.push(link);
+      if (target !== source) app.linksByNode.get(target)?.push(link);
+    });
+  }
 
   function managementUrl(node) {
     const configured = String(node?.management_url || "").trim();
@@ -251,9 +268,9 @@
       links: next.links,
       settings: next.settings && typeof next.settings === "object" ? next.settings : {}
     };
+    rebuildStateIndexes();
     app.loaded = true;
-    const ids = new Set(app.state.nodes.map(node => String(node.id)));
-    if (app.selectedNodeId && !ids.has(String(app.selectedNodeId))) app.selectedNodeId = null;
+    if (app.selectedNodeId && !app.nodeIndex.has(String(app.selectedNodeId))) app.selectedNodeId = null;
     renderAll();
     scheduleRefreshInterval();
     if (fit) requestAnimationFrame(() => fitMap());
@@ -273,7 +290,9 @@
   }
 
   function setConnection(connected) {
-    app.connected = connected;
+    const next = Boolean(connected);
+    if (app.connected === next) return;
+    app.connected = next;
     renderSyncStatus();
   }
 
@@ -435,18 +454,29 @@
 
   function renderAll() {
     renderSummary();
-    renderMap();
-    renderInspector();
-    renderDeviceTable();
-    renderLinkTable();
-    renderSettings();
-    renderRawJson(false);
+    if (app.activeView === "overview") {
+      renderMap();
+      renderInspector();
+    } else {
+      renderActiveConfigPanel();
+    }
+  }
+
+  function renderActiveConfigPanel({ forceRaw = false } = {}) {
+    if (app.activeConfigTab === "inventory") renderDeviceTable();
+    else if (app.activeConfigTab === "links") renderLinkTable();
+    else if (app.activeConfigTab === "settings") renderSettings();
+    else if (app.activeConfigTab === "data") renderRawJson(forceRaw);
   }
 
   function renderSummary() {
     const nodes = app.state.nodes;
-    const online = nodes.filter(node => node.status === "online").length;
-    const issues = nodes.filter(node => node.status === "offline" || node.status === "degraded").length;
+    let online = 0;
+    let issues = 0;
+    nodes.forEach(node => {
+      if (node.status === "online") online += 1;
+      else if (node.status === "offline" || node.status === "degraded") issues += 1;
+    });
     $("#statDevices").textContent = nodes.length;
     $("#statOnline").textContent = online;
     $("#statLinks").textContent = app.state.links.length;
@@ -476,18 +506,29 @@
     return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 
+  function hasStoredPosition(node) {
+    return node.x !== null && node.x !== "" && node.y !== null && node.y !== ""
+      && Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y));
+  }
+
   function ensurePositions() {
-    const placed = app.state.nodes.filter(node => Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y)));
-    app.state.nodes.forEach((node, index) => {
+    if (app.visualPositions.size === app.state.nodes.length) return;
+    const unplacedCount = app.state.nodes.reduce((count, node) => count + (hasStoredPosition(node) ? 0 : 1), 0);
+    let unplacedIndex = 0;
+    app.state.nodes.forEach(node => {
       const id = String(node.id);
-      if (app.visualPositions.has(id)) return;
-      if (Number.isFinite(Number(node.x)) && Number.isFinite(Number(node.y))) {
+      if (app.visualPositions.has(id)) {
+        if (!hasStoredPosition(node)) unplacedIndex += 1;
+        return;
+      }
+      if (hasStoredPosition(node)) {
         app.visualPositions.set(id, { x: Number(node.x), y: Number(node.y) });
       } else {
-        const count = Math.max(app.state.nodes.length - placed.length, 1);
-        const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
-        const radius = count <= 1 ? 0 : 170 + Math.floor(index / 10) * 100;
+        const count = Math.max(unplacedCount, 1);
+        const angle = (unplacedIndex / count) * Math.PI * 2 - Math.PI / 2;
+        const radius = count <= 1 ? 0 : 170 + Math.floor(unplacedIndex / 10) * 100;
         app.visualPositions.set(id, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius });
+        unplacedIndex += 1;
       }
     });
   }
@@ -497,12 +538,18 @@
     $("#mapEmpty").classList.toggle("hidden", !app.loaded || app.state.nodes.length > 0);
     const linkLayer = $("#linkLayer");
     const nodeLayer = $("#nodeLayer");
-    linkLayer.replaceChildren();
-    nodeLayer.replaceChildren();
-    if (!app.state.nodes.length) return;
+    if (!app.state.nodes.length) {
+      linkLayer.replaceChildren();
+      nodeLayer.replaceChildren();
+      return;
+    }
     ensurePositions();
-    app.state.links.forEach(link => renderLinkSvg(link, linkLayer));
-    app.state.nodes.forEach(node => renderNodeSvg(node, nodeLayer));
+    const linkFragment = document.createDocumentFragment();
+    const nodeFragment = document.createDocumentFragment();
+    app.state.links.forEach(link => renderLinkSvg(link, linkFragment));
+    app.state.nodes.forEach(node => renderNodeSvg(node, nodeFragment, linksForNode(node.id).length));
+    linkLayer.replaceChildren(linkFragment);
+    nodeLayer.replaceChildren(nodeFragment);
     applyTransform();
     applyMapSearch();
   }
@@ -511,6 +558,16 @@
     const element = document.createElementNS(svgNS, name);
     Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
     return element;
+  }
+
+  function deviceIconTemplate(kind) {
+    const key = deviceIcons[kind] ? kind : "other";
+    if (!svgIconTemplates.has(key)) {
+      const template = svgEl("g");
+      template.innerHTML = deviceIcons[key];
+      svgIconTemplates.set(key, template);
+    }
+    return svgIconTemplates.get(key);
   }
 
   function renderLinkSvg(link, layer) {
@@ -541,12 +598,10 @@
       text.textContent = label.length > 20 ? `${label.slice(0, 19)}…` : label;
       group.append(text);
     }
-    group.addEventListener("click", event => { event.stopPropagation(); if (app.topologyEditing) openLinkDialog(link.id); });
-    group.addEventListener("keydown", event => { if (app.topologyEditing && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openLinkDialog(link.id); } });
     layer.append(group);
   }
 
-  function renderNodeSvg(node, layer) {
+  function renderNodeSvg(node, layer, degree = linksForNode(node.id).length) {
     const id = String(node.id);
     const position = app.visualPositions.get(id);
     const group = svgEl("g", {
@@ -561,9 +616,7 @@
     group.append(svgEl("rect", { x: -55, y: -40, width: 110, height: 80, rx: 13, class: "node-body" }));
     group.append(svgEl("circle", { cx: 0, cy: -12, r: 17, class: "node-icon-disc" }));
     const icon = svgEl("g", { class: "node-icon", transform: "translate(0 -12)" });
-    const template = document.createElementNS(svgNS, "svg");
-    template.innerHTML = deviceIcons[nodeKind(node)] || deviceIcons.other;
-    [...template.children].forEach(child => icon.append(child));
+    [...deviceIconTemplate(nodeKind(node)).children].forEach(child => icon.append(child.cloneNode(true)));
     group.append(icon);
     const statusRing = svgEl("circle", { cx: 13, cy: -24, r: 5, class: "node-status-ring" });
     const status = svgEl("circle", { cx: 13, cy: -24, r: 3.5, class: `node-status ${node.status || "unknown"}` });
@@ -576,16 +629,12 @@
       subtitle.textContent = truncate(node.ip || node.hostname || titleCase(nodeKind(node)), 21);
       group.append(subtitle);
     }
-    const degree = app.state.links.filter(link => String(endpointId(link, "source")) === id || String(endpointId(link, "target")) === id).length;
     if (degree) {
       group.append(svgEl("rect", { x: 37, y: 28, width: 23, height: 14, rx: 7, class: "node-badge" }));
       const badge = svgEl("text", { x: 48.5, y: 35.5, class: "node-badge-text" });
       badge.textContent = degree;
       group.append(badge);
     }
-    group.addEventListener("pointerdown", event => startNodeDrag(event, id));
-    group.addEventListener("click", event => { if (!app.topologyEditing) { event.stopPropagation(); selectNode(id); } });
-    group.addEventListener("keydown", event => handleNodeKeydown(event, id));
     layer.append(group);
   }
 
@@ -613,6 +662,38 @@
     app.interaction = { type: "node", id, pointerId: event.pointerId, startWorld, original, moved: false };
     svg.classList.add("dragging");
     svg.setPointerCapture?.(event.pointerId);
+  }
+
+  function startTopologyInteraction(event) {
+    const node = event.target.closest?.(".node[data-node-id]");
+    if (node) {
+      startNodeDrag(event, node.dataset.nodeId);
+      return;
+    }
+    startPan(event);
+  }
+
+  function handleTopologyClick(event) {
+    const node = event.target.closest?.(".node[data-node-id]");
+    if (node && !app.topologyEditing) {
+      selectNode(node.dataset.nodeId);
+      return;
+    }
+    const link = event.target.closest?.(".link-group[data-link-id]");
+    if (link && app.topologyEditing) openLinkDialog(link.dataset.linkId);
+  }
+
+  function handleTopologyKeydown(event) {
+    const node = event.target.closest?.(".node[data-node-id]");
+    if (node) {
+      handleNodeKeydown(event, node.dataset.nodeId);
+      return;
+    }
+    const link = event.target.closest?.(".link-group[data-link-id]");
+    if (link && app.topologyEditing && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      openLinkDialog(link.dataset.linkId);
+    }
   }
 
   function startPan(event) {
@@ -668,14 +749,12 @@
     const group = $(`.node[data-node-id="${CSS.escape(String(id))}"]`);
     const position = app.visualPositions.get(String(id));
     if (group && position) group.setAttribute("transform", `translate(${position.x} ${position.y})`);
-    app.state.links.forEach(link => {
-      if (String(endpointId(link, "source")) === String(id) || String(endpointId(link, "target")) === String(id)) {
-        const old = $(`.link-group[data-link-id="${CSS.escape(String(link.id))}"]`);
-        if (!old) return;
-        const holder = document.createDocumentFragment();
-        renderLinkSvg(link, holder);
-        old.replaceWith(holder);
-      }
+    linksForNode(id).forEach(link => {
+      const old = $(`.link-group[data-link-id="${CSS.escape(String(link.id))}"]`);
+      if (!old) return;
+      const holder = document.createDocumentFragment();
+      renderLinkSvg(link, holder);
+      old.replaceWith(holder);
     });
   }
 
@@ -724,11 +803,17 @@
     ensurePositions();
     const rect = $("#topology").getBoundingClientRect();
     if (!rect.width || !rect.height) return;
-    const positions = [...app.visualPositions.values()];
-    const minX = Math.min(...positions.map(p => p.x)) - 65;
-    const maxX = Math.max(...positions.map(p => p.x)) + 65;
-    const minY = Math.min(...positions.map(p => p.y)) - 55;
-    const maxY = Math.max(...positions.map(p => p.y)) + 55;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    app.visualPositions.forEach(position => {
+      minX = Math.min(minX, position.x);
+      maxX = Math.max(maxX, position.x);
+      minY = Math.min(minY, position.y);
+      maxY = Math.max(maxY, position.y);
+    });
+    minX -= 65; maxX += 65; minY -= 55; maxY += 55;
     const width = Math.max(maxX - minX, 130);
     const height = Math.max(maxY - minY, 110);
     const scale = Math.min(1.3, Math.max(.25, Math.min((rect.width - padding) / width, (rect.height - padding) / height)));
@@ -755,17 +840,29 @@
     app.state.links.forEach(link => {
       const source = String(endpointId(link, "source"));
       const target = String(endpointId(link, "target"));
-      adjacency.get(source)?.push(target); adjacency.get(target)?.push(source);
+      adjacency.get(source)?.push(target);
+      if (target !== source) adjacency.get(target)?.push(source);
     });
     const preferredKinds = { router: 0, firewall: 1, switch: 2 };
-    const root = [...nodes].sort((a, b) => (adjacency.get(String(b.id))?.length || 0) - (adjacency.get(String(a.id))?.length || 0) || ((preferredKinds[nodeKind(a)] ?? 9) - (preferredKinds[nodeKind(b)] ?? 9)))[0];
+    let root = nodes[0];
+    for (let index = 1; index < nodes.length; index += 1) {
+      const candidate = nodes[index];
+      const candidateDegree = adjacency.get(String(candidate.id))?.length || 0;
+      const rootDegree = adjacency.get(String(root.id))?.length || 0;
+      const candidatePriority = preferredKinds[nodeKind(candidate)] ?? 9;
+      const rootPriority = preferredKinds[nodeKind(root)] ?? 9;
+      if (candidateDegree > rootDegree || (candidateDegree === rootDegree && candidatePriority < rootPriority)) root = candidate;
+    }
     const levels = new Map([[String(root.id), 0]]);
     const queue = [String(root.id)];
-    while (queue.length) {
-      const id = queue.shift();
+    let queueIndex = 0;
+    while (queueIndex < queue.length) {
+      const id = queue[queueIndex];
+      queueIndex += 1;
       for (const next of adjacency.get(id) || []) if (!levels.has(next)) { levels.set(next, levels.get(id) + 1); queue.push(next); }
     }
-    let disconnectedLevel = Math.max(0, ...levels.values()) + 1;
+    let disconnectedLevel = 1;
+    levels.forEach(level => { disconnectedLevel = Math.max(disconnectedLevel, level + 1); });
     nodes.forEach(node => { if (!levels.has(String(node.id))) levels.set(String(node.id), disconnectedLevel); });
     const grouped = new Map();
     nodes.forEach(node => { const level = levels.get(String(node.id)); if (!grouped.has(level)) grouped.set(level, []); grouped.get(level).push(node); });
@@ -810,16 +907,23 @@
     });
   }
 
+  function updateMapSelection() {
+    $$(".node.selected", $("#nodeLayer")).forEach(element => element.classList.remove("selected"));
+    if (!app.selectedNodeId) return;
+    const selected = $(`.node[data-node-id="${CSS.escape(String(app.selectedNodeId))}"]`, $("#nodeLayer"));
+    selected?.classList.add("selected");
+  }
+
   function selectNode(id) {
     app.selectedNodeId = String(id);
-    renderMap();
+    updateMapSelection();
     renderInspector();
   }
 
   function clearSelection() {
     app.selectedNodeId = null;
     app.selectedLinkId = null;
-    renderMap(); renderInspector();
+    updateMapSelection(); renderInspector();
   }
 
   function renderInspector() {
@@ -861,7 +965,7 @@
     ];
     $("#inspectorDetails").innerHTML = detailValues.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join("");
     $("#inspectorNotes").textContent = node.notes || "No notes for this device.";
-    const connections = app.state.links.filter(link => String(endpointId(link, "source")) === String(node.id) || String(endpointId(link, "target")) === String(node.id));
+    const connections = linksForNode(node.id);
     const list = $("#inspectorConnections");
     if (!connections.length) list.innerHTML = '<span class="empty-connections">No mapped connections.</span>';
     else list.innerHTML = connections.map(link => {
@@ -957,14 +1061,20 @@
     $$(".nav-item").forEach(button => { const active = button.dataset.view === name; button.classList.toggle("active", active); if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current"); });
     $("#breadcrumbCurrent").textContent = name === "overview" ? "Overview" : "Configuration";
     $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false");
-    if (name === "overview") setTimeout(() => { renderMap(); if (app.state.nodes.length) fitMap(); }, 30);
+    if (name === "overview") {
+      renderMap();
+      renderInspector();
+      if (app.state.nodes.length) requestAnimationFrame(() => fitMap());
+    } else {
+      renderActiveConfigPanel();
+    }
   }
 
   function switchConfigTab(name) {
     app.activeConfigTab = name;
     $$('[data-config-tab]').forEach(button => button.setAttribute("aria-selected", String(button.dataset.configTab === name)));
     $$(".config-panel").forEach(panel => { const active = panel.id === `${name}Panel`; panel.hidden = !active; panel.classList.toggle("active", active); });
-    if (name === "data") renderRawJson(true);
+    if (app.activeView === "configuration") renderActiveConfigPanel({ forceRaw: name === "data" });
   }
 
   function openNodeDialog(id = null) {
@@ -1026,8 +1136,11 @@
   }
 
   function nextNodePosition() {
-    ensurePositions();
-    const count = app.state.nodes.length; const angle = count * 2.4; const radius = 90 + 28 * Math.sqrt(count);
+    return nodePositionForIndex(app.state.nodes.length);
+  }
+
+  function nodePositionForIndex(count) {
+    const angle = count * 2.4; const radius = 90 + 28 * Math.sqrt(count);
     return { x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) };
   }
 
@@ -1080,7 +1193,7 @@
 
   function confirmDeleteNode(id) {
     const node = nodeById(id); if (!node) return;
-    const links = app.state.links.filter(link => String(endpointId(link, "source")) === String(id) || String(endpointId(link, "target")) === String(id)).length;
+    const links = linksForNode(id).length;
     askConfirmation({ title: `Remove ${node.name}?`, message: links ? `This also removes ${links} connected ${links === 1 ? "link" : "links"}. This action cannot be undone.` : "This device will be permanently removed from the map.", busyLabel: "Removing…", action: async () => {
       const next = await api(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" }); applyState(next); clearSelection(); toast("Device removed", `${node.name} was removed from the workspace.`);
     }});
@@ -1191,15 +1304,20 @@
     const selected = $$('#discoveryList input[type="checkbox"]:checked').map(input => app.discoveryResults[Number(input.dataset.index)]);
     if (!selected.length) { toast("Nothing selected", "Choose at least one discovered device to add.", "warning"); return; }
     const submit = $("#discoverySubmit"); setBusy(submit, true, `Adding 0/${selected.length}…`);
+    const baseNodeCount = app.state.nodes.length;
+    let expectedRevision = app.state.revision;
     let latest = null; let added = 0;
     try {
       for (const discovered of selected) {
-        const position = nextNodePosition();
+        const position = nodePositionForIndex(baseNodeCount + added);
         const allowed = { name: discovered.name || discovered.hostname || discovered.ip || "Discovered device", kind: discovered.kind || "other", ip: discovered.ip || "", mac: discovered.mac || "", hostname: discovered.hostname || "", vendor: discovered.vendor || "", status: discovered.status || "online", x: position.x, y: position.y, notes: discovered.notes || "Discovered by network scan", tags: Array.isArray(discovered.tags) ? discovered.tags : ["discovered"], config: discovered.config && typeof discovered.config === "object" ? discovered.config : {} };
-        latest = await api("/api/nodes", { method: "POST", body: JSON.stringify(allowed) }); added++; applyState(latest); setBusy(submit, true, `Adding ${added}/${selected.length}…`);
+        latest = await api("/api/nodes", { method: "POST", body: JSON.stringify(allowed), expectedRevision });
+        expectedRevision = latest.revision;
+        added += 1;
+        setBusy(submit, true, `Adding ${added}/${selected.length}…`);
       }
       $("#discoveryDialog").close(); if (latest) applyState(latest, { fit: true }); toast("Devices imported", `${added} ${added === 1 ? "device was" : "devices were"} added to the map.`);
-    } catch (error) { if (!error.handled) toast("Import stopped", `${added} added. ${error.message}`, "error"); }
+    } catch (error) { if (latest) applyState(latest, { fit: true }); if (!error.handled) toast("Import stopped", `${added} added. ${error.message}`, "error"); }
     finally { setBusy(submit, false); }
   }
 
@@ -1266,7 +1384,9 @@
     $("#topbarShowButton").addEventListener("click", () => setTopbarHidden(false, { focusControl: true }));
     $("#openConfigurationButton").addEventListener("click", () => { switchView("configuration"); switchConfigTab("inventory"); });
     const topology = $("#topology");
-    topology.addEventListener("pointerdown", startPan); topology.addEventListener("pointermove", movePointer); topology.addEventListener("pointerup", endPointer); topology.addEventListener("pointercancel", endPointer);
+    topology.addEventListener("pointerdown", startTopologyInteraction); topology.addEventListener("pointermove", movePointer); topology.addEventListener("pointerup", endPointer); topology.addEventListener("pointercancel", endPointer);
+    topology.addEventListener("click", handleTopologyClick);
+    topology.addEventListener("keydown", handleTopologyKeydown);
     topology.addEventListener("wheel", event => { event.preventDefault(); zoomAt(event.deltaY < 0 ? 1.1 : 1 / 1.1, event.clientX, event.clientY); }, { passive: false });
     $("#menuButton").addEventListener("click", () => { const open = $("#appShell").classList.toggle("nav-open"); $("#menuButton").setAttribute("aria-expanded", String(open)); });
     $("#sidebarScrim").addEventListener("click", () => { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); });
@@ -1293,8 +1413,15 @@
     });
     document.addEventListener("click", event => { const menu = $("#topologyDataMenu"); if (menu.open && !menu.contains(event.target)) menu.removeAttribute("open"); });
     document.addEventListener("keydown", event => { if (event.key !== "Escape") return; $("#topologyDataMenu").removeAttribute("open"); if ($("#appShell").classList.contains("nav-open")) { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); $("#menuButton").focus(); } });
-    window.addEventListener("resize", () => { if (window.innerWidth > 930) { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); } if (app.activeView === "overview" && app.state.nodes.length) fitMap(); });
-    window.addEventListener("beforeunload", () => { closeEvents(); clearInterval(app.syncStatusTimer); clearTimeout(app.layoutFitTimer); });
+    window.addEventListener("resize", () => { if (window.innerWidth > 930) { $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false"); } scheduleMapFit(180); });
+    window.addEventListener("beforeunload", () => {
+      closeEvents();
+      clearInterval(app.syncStatusTimer);
+      clearInterval(app.refreshTimer);
+      clearTimeout(app.eventRefreshTimer);
+      clearTimeout(app.layoutFitTimer);
+      clearTimeout(handleNodeKeydown.timer);
+    });
   }
 
   async function loadInitialState() {
