@@ -400,6 +400,7 @@ LINK_FIELDS = {
     "status",
     "directed",
     "bandwidth_mbps",
+    "duplex",
     "notes",
     "config",
 }
@@ -435,6 +436,7 @@ def validate_link(
             "status": "active",
             "directed": False,
             "bandwidth_mbps": None,
+            "duplex": "unknown",
             "notes": "",
             "config": {},
         }
@@ -464,8 +466,66 @@ def validate_link(
         "status": _choice(values["status"], "status", LINK_STATUSES),
         "directed": _boolean(values["directed"], "directed"),
         "bandwidth_mbps": bandwidth,
+        "duplex": _choice(
+            values.get("duplex", "unknown"), "duplex", {"unknown", "full", "half", "auto"}
+        ),
         "notes": _string(values["notes"], "notes", maximum=10_000, strip=False),
         "config": _json_object(values["config"], "config"),
+    }
+
+
+AREA_FIELDS = {"id", "label", "shape", "x", "y", "width", "height", "color", "vlan_id"}
+MAX_AREAS = 1_000
+
+
+def validate_area(
+    raw: Any,
+    *,
+    partial: bool = False,
+    current: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    obj = _require_object(raw, "area")
+    _reject_unknown_fields(obj, AREA_FIELDS, "area")
+    if partial:
+        if current is None:
+            raise RuntimeError("current area is required for a partial update")
+        if "id" in obj and obj["id"] != current["id"]:
+            raise validation_error("id cannot be changed", "id")
+        values = dict(current)
+    else:
+        values = {
+            "id": uuid.uuid4().hex,
+            "label": "New area",
+            "shape": "rectangle",
+            "x": 0,
+            "y": 0,
+            "width": 320,
+            "height": 220,
+            "color": "blue",
+            "vlan_id": None,
+        }
+    values.update(obj)
+    vlan_id = values["vlan_id"]
+    if vlan_id is not None and (
+        isinstance(vlan_id, bool)
+        or not isinstance(vlan_id, int)
+        or not 1 <= vlan_id <= 4094
+    ):
+        raise validation_error(
+            "vlan_id must be null or an integer from 1 to 4094", "vlan_id"
+        )
+    return {
+        "id": _identifier(values["id"]),
+        "label": _string(values["label"], "label", maximum=120, allow_empty=False),
+        "shape": _choice(values["shape"], "shape", {"rectangle", "ellipse"}),
+        "x": _number(values["x"], "x", minimum=-1_000_000, maximum=1_000_000),
+        "y": _number(values["y"], "y", minimum=-1_000_000, maximum=1_000_000),
+        "width": _number(values["width"], "width", minimum=40, maximum=100_000),
+        "height": _number(values["height"], "height", minimum=40, maximum=100_000),
+        "color": _choice(
+            values["color"], "color", {"blue", "green", "amber", "violet", "gray"}
+        ),
+        "vlan_id": vlan_id,
     }
 
 
@@ -633,6 +693,7 @@ def demo_document() -> dict[str, Any]:
     return {
         "nodes": [validate_node(node) for node in nodes],
         "links": [validate_link(link) for link in links],
+        "areas": [],
         "settings": validate_settings(DEFAULT_SETTINGS),
     }
 
@@ -642,6 +703,7 @@ def validate_state_document(raw: Any) -> dict[str, Any]:
     allowed = {
         "nodes",
         "links",
+        "areas",
         "settings",
         "revision",
         "updated_at",
@@ -659,6 +721,13 @@ def validate_state_document(raw: Any) -> dict[str, Any]:
         raise validation_error("nodes must be an array of at most 10,000 items", "nodes")
     if not isinstance(obj["links"], list) or len(obj["links"]) > 50_000:
         raise validation_error("links must be an array of at most 50,000 items", "links")
+    raw_areas = obj.get("areas", [])
+    if not isinstance(raw_areas, list) or len(raw_areas) > MAX_AREAS:
+        raise validation_error("areas must be an array of at most 1,000 items", "areas")
+    areas = [validate_area(item) for item in raw_areas]
+    area_ids = [item["id"] for item in areas]
+    if len(set(area_ids)) != len(area_ids):
+        raise validation_error("Area IDs must be unique", "areas")
     nodes = [validate_node(item) for item in obj["nodes"]]
     node_ids = [item["id"] for item in nodes]
     if len(set(node_ids)) != len(node_ids):
@@ -678,6 +747,7 @@ def validate_state_document(raw: Any) -> dict[str, Any]:
     return {
         "nodes": nodes,
         "links": links,
+        "areas": areas,
         "settings": validate_settings(obj["settings"]),
     }
 
@@ -856,6 +926,14 @@ class StateStore:
                 )
                 connection.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS areas (
+                        id TEXT PRIMARY KEY,
+                        data TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS settings (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         data TEXT NOT NULL
@@ -945,6 +1023,11 @@ class StateStore:
                 "INSERT INTO links(id, source, target, data) VALUES(?, ?, ?, ?)",
                 (link["id"], link["source"], link["target"], self._dump(link)),
             )
+        for area in document.get("areas", []):
+            connection.execute(
+                "INSERT INTO areas(id, data) VALUES(?, ?)",
+                (area["id"], self._dump(area)),
+            )
         connection.execute(
             "INSERT INTO settings(singleton, data) VALUES(1, ?)",
             (self._dump(document["settings"]),),
@@ -974,8 +1057,12 @@ class StateStore:
                 for row in connection.execute("SELECT data FROM nodes ORDER BY rowid")
             ],
             "links": [
-                self._load(row["data"])
+                {"duplex": "unknown", **self._load(row["data"])}
                 for row in connection.execute("SELECT data FROM links ORDER BY rowid")
+            ],
+            "areas": [
+                self._load(row["data"])
+                for row in connection.execute("SELECT data FROM areas ORDER BY rowid")
             ],
             "settings": self._load(settings_row["data"]),
         }
@@ -1156,7 +1243,7 @@ class StateStore:
                 self._close(connection)
         if row is None:
             raise self._missing("link", link_id)
-        return self._load(row["data"])
+        return {"duplex": "unknown", **self._load(row["data"])}
 
     @staticmethod
     def _assert_link_nodes(
@@ -1236,6 +1323,76 @@ class StateStore:
 
         return self._mutate(operation, expected_revision)
 
+    def get_area(self, area_id: str) -> dict[str, Any]:
+        area_id = _identifier(area_id)
+        with self._lock:
+            connection = self._connect()
+            try:
+                row = connection.execute(
+                    "SELECT data FROM areas WHERE id = ?", (area_id,)
+                ).fetchone()
+            finally:
+                self._close(connection)
+        if row is None:
+            raise self._missing("area", area_id)
+        return self._load(row["data"])
+
+    def create_area(
+        self, raw: Any, expected_revision: int | None = None
+    ) -> dict[str, Any]:
+        area = validate_area(raw)
+
+        def operation(connection: sqlite3.Connection) -> None:
+            if connection.execute("SELECT COUNT(*) FROM areas").fetchone()[0] >= MAX_AREAS:
+                raise validation_error("A topology may contain at most 1,000 areas", "areas")
+            try:
+                connection.execute(
+                    "INSERT INTO areas(id, data) VALUES(?, ?)",
+                    (area["id"], self._dump(area)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise APIError(
+                    "already_exists",
+                    f"Area '{area['id']}' already exists",
+                    HTTPStatus.CONFLICT,
+                ) from exc
+
+        return self._mutate(operation, expected_revision)
+
+    def update_area(
+        self,
+        area_id: str,
+        raw: Any,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        area_id = _identifier(area_id)
+
+        def operation(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                "SELECT data FROM areas WHERE id = ?", (area_id,)
+            ).fetchone()
+            if row is None:
+                raise self._missing("area", area_id)
+            updated = validate_area(raw, partial=True, current=self._load(row["data"]))
+            connection.execute(
+                "UPDATE areas SET data = ? WHERE id = ?",
+                (self._dump(updated), area_id),
+            )
+
+        return self._mutate(operation, expected_revision)
+
+    def delete_area(
+        self, area_id: str, expected_revision: int | None = None
+    ) -> dict[str, Any]:
+        area_id = _identifier(area_id)
+
+        def operation(connection: sqlite3.Connection) -> None:
+            cursor = connection.execute("DELETE FROM areas WHERE id = ?", (area_id,))
+            if cursor.rowcount == 0:
+                raise self._missing("area", area_id)
+
+        return self._mutate(operation, expected_revision)
+
     def update_settings(
         self, raw: Any, expected_revision: int | None = None
     ) -> dict[str, Any]:
@@ -1263,6 +1420,7 @@ class StateStore:
         def operation(connection: sqlite3.Connection) -> None:
             connection.execute("DELETE FROM links")
             connection.execute("DELETE FROM nodes")
+            connection.execute("DELETE FROM areas")
             connection.execute("DELETE FROM settings")
             self._insert_document(connection, document)
 
@@ -2336,6 +2494,48 @@ class NetworkMapRequestHandler(BaseHTTPRequestHandler):
             else:
                 raise self._method_not_allowed("GET, HEAD, PATCH, DELETE")
             return
+        if path == "/api/areas":
+            if method in {"GET", "HEAD"}:
+                state = store.get_state()
+                self._send_json(
+                    {
+                        "revision": state["revision"],
+                        "updated_at": state["updated_at"],
+                        "areas": state["areas"],
+                    }
+                )
+            elif method == "POST":
+                self._send_json(
+                    store.create_area(self._read_json(), expected),
+                    status=HTTPStatus.CREATED,
+                )
+            else:
+                raise self._method_not_allowed("GET, HEAD, POST")
+            return
+        if path.startswith("/api/areas/"):
+            area_id = _identifier(unquote(path[len("/api/areas/") :]))
+            if method in {"GET", "HEAD"}:
+                state = store.get_state()
+                area = next(
+                    (item for item in state["areas"] if item["id"] == area_id),
+                    None,
+                )
+                if area is None:
+                    raise store._missing("area", area_id)
+                self._send_json(
+                    {
+                        "revision": state["revision"],
+                        "updated_at": state["updated_at"],
+                        "area": area,
+                    }
+                )
+            elif method == "PATCH":
+                self._send_json(store.update_area(area_id, self._read_json(), expected))
+            elif method == "DELETE":
+                self._send_json(store.delete_area(area_id, expected))
+            else:
+                raise self._method_not_allowed("GET, HEAD, PATCH, DELETE")
+            return
         if path == "/api/settings":
             if method in {"GET", "HEAD"}:
                 state = store.get_state()
@@ -2463,6 +2663,8 @@ class NetworkMapRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
+        if candidate == static_root / "sw.js":
+            self.send_header("Service-Worker-Allowed", "/")
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -2477,6 +2679,7 @@ class NetworkMapRequestHandler(BaseHTTPRequestHandler):
             "index.html",
             "sw.js",
             "app.js",
+            "areas.js",
             "styles.css",
             "manifest.webmanifest",
         }:

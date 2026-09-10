@@ -131,21 +131,26 @@ def normalize_server_url(value: str) -> str:
 def canonical_topology(document: Mapping[str, Any]) -> dict[str, Any]:
     """Extract canonical topology content, excluding all transport metadata.
 
-    Only ``nodes``, ``links``, and ``settings`` participate.  Revisions,
+    Only ``nodes``, ``links``, ``areas``, and ``settings`` participate.  Revisions,
     timestamps, export metadata, and instance identifiers therefore cannot make
-    equivalent topologies appear different.  Node and link order is normalized
+    equivalent topologies appear different.  Entity order is normalized
     by identifier; mapping key order is normalized when serialized for hashing.
+    Empty areas and unknown duplex are omitted so pre-area checkpoints keep
+    their digest and an application upgrade does not look like a topology edit.
     """
 
     if not isinstance(document, Mapping):
         raise SyncProtocolError("NetworkMap state must be a JSON object")
     nodes = document.get("nodes")
     links = document.get("links")
+    areas = document.get("areas", [])
     settings = document.get("settings")
     if not isinstance(nodes, list) or not isinstance(links, list):
         raise SyncProtocolError("NetworkMap state must contain node and link arrays")
     if not isinstance(settings, Mapping):
         raise SyncProtocolError("NetworkMap state must contain settings")
+    if not isinstance(areas, list):
+        raise SyncProtocolError("NetworkMap areas must be an array")
 
     def entities(values: list[Any], name: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -163,11 +168,18 @@ def canonical_topology(document: Mapping[str, Any]) -> dict[str, Any]:
         result.sort(key=lambda item: item["id"])
         return result
 
-    return {
+    normalized_links = entities(links, "links")
+    for link in normalized_links:
+        if link.get("duplex") == "unknown":
+            link.pop("duplex")
+    result = {
         "nodes": entities(nodes, "nodes"),
-        "links": entities(links, "links"),
+        "links": normalized_links,
         "settings": deepcopy(dict(settings)),
     }
+    if areas:
+        result["areas"] = entities(areas, "areas")
+    return result
 
 
 def topology_digest(document: Mapping[str, Any]) -> str:

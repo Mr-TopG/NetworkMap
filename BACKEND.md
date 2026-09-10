@@ -38,6 +38,7 @@ httpd = create_server(port=8765)  # bound, but not started
   "updated_at": "2026-09-05T17:30:00.000Z",
   "nodes": [],
   "links": [],
+  "areas": [],
   "settings": {}
 }
 ```
@@ -48,9 +49,21 @@ A node has `id`, `name`, `kind`, `ip`, `mac`, `hostname`, `vendor`,
 credentials. `winbox_enabled` remains accepted for backup compatibility, but
 the current UI detects WinBox support from `MikroTik` in the vendor field. A
 link has `id`, `source`, `target`, `name`, `kind`, `status`,
-`directed`, `bandwidth_mbps`, `notes`, and `config`.
+`directed`, `bandwidth_mbps`, `duplex`, `notes`, and `config`.
 The `source` and `target` values are node IDs. The backend accepts `label` as a
 legacy input alias for link `name`, but always emits `name`.
+`duplex` is `unknown` (the default for older links), `full`, `half`, or `auto`.
+Speed and duplex are stored configuration, not live negotiated measurements.
+
+An area is a labeled map annotation with `id`, `label`, `shape` (`rectangle` or
+`ellipse`), `x`, `y`, `width`, `height`, `color`, and `vlan_id`. Coordinates give
+the upper-left corner in map units, with each coordinate from -1,000,000 to
+1,000,000 and width/height from 40 to 100,000. Equal dimensions make a square or
+circle. Labels are nonempty and at most 120 characters; color is `blue`,
+`green`, `amber`, `violet`, or `gray`. `vlan_id` is null or an integer from 1 to
+4094. Areas are visual annotations only and do not change device configuration.
+Up to 1,000 areas can be stored. Older imports may omit `areas`; this means an
+empty array. Areas persist through exports, imports, and native synchronization.
 
 Settings use `name`, `description`, `subnet`, `refresh_interval`,
 `show_link_labels`, `compact_labels`, and `theme`; `grid_size`, `snap_to_grid`,
@@ -66,6 +79,10 @@ The native worker compares topology content against a durable common baseline;
 it does not treat unrelated revision numbers or timestamps as ordering. A
 conflict choice is bound to the exact local and hosted snapshots shown to the
 user, so a later edit invalidates the choice instead of being overwritten.
+Entity order does not affect sync comparison. Empty areas and unknown duplex
+have the same digest as their omitted legacy equivalents, preserving existing
+sync checkpoints on upgrade. Upgrade both clients and the hosted server to use
+nonempty areas or explicit duplex; older servers reject these new fields.
 
 ## Routes
 
@@ -73,13 +90,15 @@ user, so a later edit invalidates the choice instead of being overwritten.
 | --- | --- | --- |
 | GET | `/api/health` | Public readiness, version, and revision |
 | GET | `/api/state` | Complete current state |
-| PUT | `/api/state` | Validate and replace nodes, links, and settings |
+| PUT | `/api/state` | Validate and replace nodes, links, areas, and settings |
 | GET | `/api/sync/status` | Secret-free native synchronization status, or hosted-only status |
 | POST | `/api/sync/actions` | Ask the active native worker to sync or resolve its current conflict |
 | GET, POST | `/api/nodes` | List or create nodes |
 | GET, PATCH, DELETE | `/api/nodes/{id}` | Read, edit, or delete a node; deletion cascades its links |
 | GET, POST | `/api/links` | List links or create one between existing nodes |
 | GET, PATCH, DELETE | `/api/links/{id}` | Read, edit, or delete a link |
+| GET, POST | `/api/areas` | List or create labeled topology regions |
+| GET, PATCH, DELETE | `/api/areas/{id}` | Read, edit, or delete an area |
 | GET, PATCH | `/api/settings` | Read settings or update one or more |
 | GET | `/api/export` | Download complete state JSON |
 | POST | `/api/import` | Validate and atomically restore exported JSON |

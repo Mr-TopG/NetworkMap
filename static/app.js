@@ -4,7 +4,7 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const svgNS = "http://www.w3.org/2000/svg";
-  const emptyState = { revision: 0, updated_at: null, nodes: [], links: [], settings: {} };
+  const emptyState = { revision: 0, updated_at: null, nodes: [], links: [], areas: [], settings: {} };
   const app = {
     state: { ...emptyState },
     loaded: false,
@@ -32,25 +32,10 @@
     discoveryResults: [],
     confirmAction: null
   };
-  const svgIconTemplates = new Map();
-
-  const deviceIcons = {
-    router: '<circle cx="0" cy="0" r="9"/><path d="M-5 0h10M0-5v10M-5 0l2-2M-5 0l2 2M5 0 3-2M5 0l3 2M0-5l-2 2M0-5l2 2"/>',
-    switch: '<rect x="-10" y="-7" width="20" height="14" rx="2"/><path d="M-6-2h2M0-2h2M6-2h1M-6 3h2M0 3h2M6 3h1"/>',
-    server: '<rect x="-9" y="-10" width="18" height="20" rx="2"/><path d="M-5-5h6M-5 0h6M-5 5h6M5-5h.1M5 0h.1M5 5h.1"/>',
-    workstation: '<rect x="-10" y="-9" width="20" height="14" rx="2"/><path d="M-4 10h8M0 5v5"/>',
-    laptop: '<path d="M-8-9H8v13H-8Z M-11 8h22l-2 3H-9Z"/>',
-    mobile: '<rect x="-6" y="-11" width="12" height="22" rx="3"/><path d="M-2-8h4M0 8h.1"/>',
-    "access-point": '<circle cx="0" cy="6" r="2"/><path d="M-5 2a7 7 0 0 1 10 0M-9-2a13 13 0 0 1 18 0M0 8v3"/>',
-    firewall: '<path d="M0-11 9-7v6c0 6-4 9-9 12-5-3-9-6-9-12v-6Z"/><path d="M-7-4h14M-7 1h14M-3-4v5M4-4v5"/>',
-    printer: '<path d="M-7-5v-5H7v5M-7 6v5H7V6"/><rect x="-10" y="-5" width="20" height="11" rx="2"/><path d="M6-1h.1"/>',
-    camera: '<rect x="-10" y="-7" width="20" height="14" rx="3"/><circle cx="0" cy="0" r="4"/><path d="m-6-7 2-4h8l2 4"/>',
-    storage: '<ellipse cx="0" cy="-7" rx="9" ry="4"/><path d="M-9-7V7c0 2 4 4 9 4s9-2 9-4V-7M-9 0c0 2 4 4 9 4s9-2 9-4"/>',
-    nas: '<rect x="-9" y="-10" width="18" height="20" rx="2"/><path d="M-5-6h10M-5-1h10M-5 4h10M5 7h.1"/>',
-    iot: '<rect x="-8" y="-8" width="16" height="16" rx="3"/><path d="M-11-4h3M-11 2h3M8-4h3M8 2h3M-4-11v3M2-11v3M-4 8v3M2 8v3"/><circle cx="0" cy="0" r="3"/>',
-    cloud: '<path d="M-7 7h14a6 6 0 0 0 1-12 9 9 0 0 0-17 3A4.5 4.5 0 0 0-7 7Z"/>',
-    other: '<circle cx="0" cy="0" r="9"/><path d="M0-4v.1M0 0v5"/>'
-  };
+  const deviceIconKinds = new Set([
+    "router", "switch", "server", "workstation", "laptop", "mobile", "access-point",
+    "firewall", "printer", "camera", "storage", "nas", "iot", "cloud", "other"
+  ]);
 
   function readInitialToken() {
     const url = new URL(window.location.href);
@@ -74,7 +59,11 @@
   }
 
   function iconMarkup(kind) {
-    return `<svg viewBox="-12 -12 24 24" aria-hidden="true">${deviceIcons[kind] || deviceIcons.other}</svg>`;
+    return `<img src="${deviceIconPath(kind)}" alt="" width="48" height="36" draggable="false">`;
+  }
+
+  function deviceIconPath(kind) {
+    return `/static/devices/${deviceIconKinds.has(kind) ? kind : "other"}.svg`;
   }
 
   function escapeHtml(value) {
@@ -93,6 +82,28 @@
   function linksForNode(id) { return app.linksByNode.get(String(id)) || []; }
   function endpointId(link, end) { return link[end] ?? link[`${end}_id`] ?? ""; }
   function linkUiStatus(status) { return status === "active" || status === "online" ? "online" : status === "inactive" || status === "offline" ? "offline" : status === "degraded" ? "degraded" : "unknown"; }
+
+  const SPEED_PRESETS = [10, 100, 1000, 2500, 5000, 10000, 25000, 40000, 50000, 100000, 200000, 400000, 800000];
+  const DUPLEX_LABELS = { unknown: "Duplex not specified", full: "Full duplex", half: "Half duplex", auto: "Auto-negotiation" };
+
+  function formatLinkSpeed(value) {
+    if (value == null || value === "") return "Not specified";
+    const mbps = Number(value);
+    if (!Number.isFinite(mbps) || mbps < 0) return "Not specified";
+    const number = mbps >= 1000 ? mbps / 1000 : mbps;
+    return `${number.toLocaleString(undefined, { maximumFractionDigits: 12 })} ${mbps >= 1000 ? "Gbps" : "Mbps"}`;
+  }
+
+  function formatLinkDuplex(value) {
+    return Object.hasOwn(DUPLEX_LABELS, value) ? DUPLEX_LABELS[value] : DUPLEX_LABELS.unknown;
+  }
+
+  function setLinkSpeedMode() {
+    const custom = $("#linkSpeedPreset").value === "custom";
+    $("#linkCustomSpeedField").hidden = !custom;
+    $("#linkSpeed").disabled = !custom;
+    $("#linkSpeed").required = custom;
+  }
 
   function rebuildStateIndexes() {
     app.nodeIndex = new Map(app.state.nodes.map(node => [String(node.id), node]));
@@ -159,13 +170,13 @@
     $("#topologyEditButton").setAttribute("aria-pressed", String(app.topologyEditing));
     $("span", $("#topologyEditButton")).textContent = app.topologyEditing ? "Done editing" : "Edit topology";
     $$(".topology-edit-only").forEach(element => { element.hidden = !app.topologyEditing; });
-    $("#mapTip").textContent = app.topologyEditing ? "Edit mode · Drag nodes or select links" : "View mode · Click a device to inspect";
+    $("#mapTip").textContent = app.topologyEditing ? "Edit mode · Drag devices/areas · Click to edit areas or links" : "View mode · Click a device to inspect";
     if (app.loaded) { renderMap(); renderInspector(); }
   }
 
   function scheduleMapFit(delay = 0) {
     clearTimeout(app.layoutFitTimer);
-    if (!app.loaded || app.activeView !== "overview" || !app.state.nodes.length) return;
+    if (!app.loaded || app.activeView !== "overview" || (!app.state.nodes.length && !app.state.areas.length)) return;
     app.layoutFitTimer = setTimeout(() => {
       app.layoutFitTimer = null;
       fitMap();
@@ -268,6 +279,7 @@
       updated_at: next.updated_at ?? new Date().toISOString(),
       nodes: next.nodes,
       links: next.links,
+      areas: Array.isArray(next.areas) ? next.areas : [],
       settings: next.settings && typeof next.settings === "object" ? next.settings : {}
     };
     rebuildStateIndexes();
@@ -467,6 +479,7 @@
   function renderActiveConfigPanel({ forceRaw = false } = {}) {
     if (app.activeConfigTab === "inventory") renderDeviceTable();
     else if (app.activeConfigTab === "links") renderLinkTable();
+    else if (app.activeConfigTab === "areas") areaEditor.renderTable();
     else if (app.activeConfigTab === "settings") renderSettings();
     else if (app.activeConfigTab === "data") renderRawJson(forceRaw);
   }
@@ -537,19 +550,21 @@
 
   function renderMap() {
     $("#mapLoading").classList.toggle("hidden", app.loaded);
-    $("#mapEmpty").classList.toggle("hidden", !app.loaded || app.state.nodes.length > 0);
+    $("#mapEmpty").classList.toggle("hidden", !app.loaded || app.state.nodes.length > 0 || app.state.areas.length > 0);
+    areaEditor.renderMap();
     const linkLayer = $("#linkLayer");
     const nodeLayer = $("#nodeLayer");
     if (!app.state.nodes.length) {
       linkLayer.replaceChildren();
       nodeLayer.replaceChildren();
+      applyTransform();
       return;
     }
     ensurePositions();
     const linkFragment = document.createDocumentFragment();
     const nodeFragment = document.createDocumentFragment();
     app.state.links.forEach(link => renderLinkSvg(link, linkFragment));
-    app.state.nodes.forEach(node => renderNodeSvg(node, nodeFragment, linksForNode(node.id).length));
+    app.state.nodes.forEach(node => renderNodeSvg(node, nodeFragment));
     linkLayer.replaceChildren(linkFragment);
     nodeLayer.replaceChildren(nodeFragment);
     applyTransform();
@@ -560,16 +575,6 @@
     const element = document.createElementNS(svgNS, name);
     Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
     return element;
-  }
-
-  function deviceIconTemplate(kind) {
-    const key = deviceIcons[kind] ? kind : "other";
-    if (!svgIconTemplates.has(key)) {
-      const template = svgEl("g");
-      template.innerHTML = deviceIcons[key];
-      svgIconTemplates.set(key, template);
-    }
-    return svgIconTemplates.get(key);
   }
 
   function renderLinkSvg(link, layer) {
@@ -603,7 +608,7 @@
     layer.append(group);
   }
 
-  function renderNodeSvg(node, layer, degree = linksForNode(node.id).length) {
+  function renderNodeSvg(node, layer) {
     const id = String(node.id);
     const position = app.visualPositions.get(id);
     const group = svgEl("g", {
@@ -612,30 +617,26 @@
       "data-node-id": id,
       role: "button",
       tabindex: "0",
+      "aria-pressed": String(String(app.selectedNodeId) === id),
       "aria-label": `${node.name || "Unnamed device"}, ${node.status || "unknown"}. Press Enter to inspect${app.topologyEditing ? "; arrow keys to move." : "."}`
     });
-    group.append(svgEl("rect", { x: -63, y: -48, width: 126, height: 96, rx: 17, class: "node-halo" }));
-    group.append(svgEl("rect", { x: -55, y: -40, width: 110, height: 80, rx: 13, class: "node-body" }));
-    group.append(svgEl("circle", { cx: 0, cy: -12, r: 17, class: "node-icon-disc" }));
-    const icon = svgEl("g", { class: "node-icon", transform: "translate(0 -12)" });
-    [...deviceIconTemplate(nodeKind(node)).children].forEach(child => icon.append(child.cloneNode(true)));
-    group.append(icon);
-    const statusRing = svgEl("circle", { cx: 13, cy: -24, r: 5, class: "node-status-ring" });
-    const status = svgEl("circle", { cx: 13, cy: -24, r: 3.5, class: `node-status ${node.status || "unknown"}` });
-    group.append(statusRing, status);
-    const title = svgEl("text", { x: 0, y: 16, class: "node-title" });
+    const tooltip = svgEl("title");
+    tooltip.textContent = [node.name || "Unnamed device", titleCase(nodeKind(node)), node.ip || node.hostname, node.status || "unknown"].filter(Boolean).join(" · ");
+    group.append(tooltip);
+    group.append(svgEl("rect", { x: -63, y: -48, width: 126, height: 100, rx: 4, class: "node-halo" }));
+    group.append(svgEl("rect", { x: -63, y: -48, width: 126, height: 100, rx: 4, class: "node-body" }));
+    group.append(svgEl("image", { x: -36, y: -42, width: 72, height: 56, href: deviceIconPath(nodeKind(node)), class: "node-device-image", "aria-hidden": "true" }));
+    if (["offline", "degraded"].includes(node.status)) {
+      group.append(svgEl("circle", { cx: 35, cy: -32, r: 5, class: "node-status-ring" }));
+      group.append(svgEl("circle", { cx: 35, cy: -32, r: 3.5, class: `node-status ${node.status}` }));
+    }
+    const title = svgEl("text", { x: 0, y: 32, class: "node-title" });
     title.textContent = truncate(node.name || "Unnamed device", 17);
     group.append(title);
     if (!app.state.settings.compact_labels) {
-      const subtitle = svgEl("text", { x: 0, y: 29, class: "node-subtitle" });
+      const subtitle = svgEl("text", { x: 0, y: 46, class: "node-subtitle" });
       subtitle.textContent = truncate(node.ip || node.hostname || titleCase(nodeKind(node)), 21);
       group.append(subtitle);
-    }
-    if (degree) {
-      group.append(svgEl("rect", { x: 37, y: 28, width: 23, height: 14, rx: 7, class: "node-badge" }));
-      const badge = svgEl("text", { x: 48.5, y: 35.5, class: "node-badge-text" });
-      badge.textContent = degree;
-      group.append(badge);
     }
     layer.append(group);
   }
@@ -793,7 +794,7 @@
     const sy = clientY ?? rect.top + rect.height / 2;
     const worldX = (sx - rect.left - app.transform.x) / app.transform.scale;
     const worldY = (sy - rect.top - app.transform.y) / app.transform.scale;
-    const scale = Math.min(2.5, Math.max(.25, app.transform.scale * factor));
+    const scale = Math.min(2.5, Math.max(.001, app.transform.scale * factor));
     app.transform.x = sx - rect.left - worldX * scale;
     app.transform.y = sy - rect.top - worldY * scale;
     app.transform.scale = scale;
@@ -801,7 +802,7 @@
   }
 
   function fitMap(padding = 80) {
-    if (!app.state.nodes.length) return;
+    if (!app.state.nodes.length && !app.state.areas.length) return;
     ensurePositions();
     const rect = $("#topology").getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -816,9 +817,13 @@
       maxY = Math.max(maxY, position.y);
     });
     minX -= 65; maxX += 65; minY -= 55; maxY += 55;
+    app.state.areas.forEach(area => {
+      minX = Math.min(minX, area.x); maxX = Math.max(maxX, area.x + area.width);
+      minY = Math.min(minY, area.y); maxY = Math.max(maxY, area.y + area.height);
+    });
     const width = Math.max(maxX - minX, 130);
     const height = Math.max(maxY - minY, 110);
-    const scale = Math.min(1.3, Math.max(.25, Math.min((rect.width - padding) / width, (rect.height - padding) / height)));
+    const scale = Math.min(1.3, Math.max(.001, Math.min((rect.width - padding) / width, (rect.height - padding) / height)));
     app.transform.scale = scale;
     app.transform.x = rect.width / 2 - ((minX + maxX) / 2) * scale;
     app.transform.y = rect.height / 2 - ((minY + maxY) / 2) * scale;
@@ -889,7 +894,7 @@
       const latest = await api("/api/state", {
         method: "PUT",
         expectedRevision,
-        body: JSON.stringify({ nodes: arrangedNodes, links: app.state.links, settings: app.state.settings })
+        body: JSON.stringify({ nodes: arrangedNodes, links: app.state.links, areas: app.state.areas, settings: app.state.settings })
       });
       applyState(latest);
       toast("Map arranged", `${nodes.length} device positions were saved.`);
@@ -910,10 +915,11 @@
   }
 
   function updateMapSelection() {
-    $$(".node.selected", $("#nodeLayer")).forEach(element => element.classList.remove("selected"));
+    $$(".node.selected", $("#nodeLayer")).forEach(element => { element.classList.remove("selected"); element.setAttribute("aria-pressed", "false"); });
     if (!app.selectedNodeId) return;
     const selected = $(`.node[data-node-id="${CSS.escape(String(app.selectedNodeId))}"]`, $("#nodeLayer"));
     selected?.classList.add("selected");
+    selected?.setAttribute("aria-pressed", "true");
   }
 
   function selectNode(id) {
@@ -970,14 +976,14 @@
     const connections = linksForNode(node.id);
     const list = $("#inspectorConnections");
     if (!connections.length) list.innerHTML = '<span class="empty-connections">No mapped connections.</span>';
-    else list.innerHTML = connections.map(link => {
+    else list.innerHTML = '<p class="connection-data-note">Configured speed and duplex, not live measurements.</p>' + connections.map(link => {
       const otherId = String(endpointId(link, "source")) === String(node.id) ? endpointId(link, "target") : endpointId(link, "source");
       const other = nodeById(otherId);
       const status = linkUiStatus(link.status);
-      return `<button class="connection-item" data-link-id="${escapeHtml(link.id)}"><span class="connection-line-icon ${status}"><svg viewBox="0 0 24 24"><path d="M5 12h14M16 9l3 3-3 3"/></svg></span><div><strong>${escapeHtml(other?.name || "Unknown device")}</strong><span>${escapeHtml(linkName(link) || titleCase(linkKind(link)))}</span></div></button>`;
+      return `<button class="connection-item" data-link-id="${escapeHtml(link.id)}"><span class="connection-line-icon ${status}"><svg viewBox="0 0 24 24"><path d="M5 12h14M16 9l3 3-3 3"/></svg></span><div><strong>${escapeHtml(other?.name || "Unknown device")}</strong><span>${escapeHtml(linkName(link) || titleCase(linkKind(link)))}</span><span class="connection-metrics">${escapeHtml(formatLinkSpeed(link.bandwidth_mbps))} · ${escapeHtml(formatLinkDuplex(link.duplex))}</span></div></button>`;
     }).join("");
     $$(".connection-item", list).forEach(button => {
-      button.disabled = !app.topologyEditing;
+      button.setAttribute("aria-disabled", String(!app.topologyEditing));
       button.title = app.topologyEditing ? "Edit connection" : "Enable Edit topology to change this connection";
       button.addEventListener("click", () => { if (app.topologyEditing) openLinkDialog(button.dataset.linkId); });
     });
@@ -1008,8 +1014,7 @@
     body.innerHTML = app.state.links.map(link => {
       const source = nodeById(endpointId(link, "source")); const target = nodeById(endpointId(link, "target"));
       const status = linkUiStatus(link.status);
-      const speed = link.bandwidth_mbps != null ? `${Number(link.bandwidth_mbps).toLocaleString()} Mbps` : "—";
-      return `<tr data-link-id="${escapeHtml(link.id)}"><td>${escapeHtml(source?.name || "Missing device")}</td><td>${escapeHtml(target?.name || "Missing device")}</td><td>${escapeHtml(linkName(link) || titleCase(linkKind(link)))}</td><td>${escapeHtml(speed)}</td><td><span class="status-badge ${status}">${escapeHtml(titleCase(link.status || "unknown"))}</span></td><td><div class="row-actions"><button data-action="edit" title="Edit connection" aria-label="Edit connection"><svg viewBox="0 0 24 24"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2Z"/></svg></button><button class="danger-action" data-action="delete" title="Remove connection" aria-label="Remove connection"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M9 11v6M15 11v6M6 7l1 14h10l1-14"/></svg></button></div></td></tr>`;
+      return `<tr data-link-id="${escapeHtml(link.id)}"><td>${escapeHtml(source?.name || "Missing device")}</td><td>${escapeHtml(target?.name || "Missing device")}</td><td>${escapeHtml(linkName(link) || titleCase(linkKind(link)))}</td><td>${escapeHtml(formatLinkSpeed(link.bandwidth_mbps))}</td><td>${escapeHtml(formatLinkDuplex(link.duplex))}</td><td><span class="status-badge ${status}">${escapeHtml(titleCase(link.status || "unknown"))}</span></td><td><div class="row-actions"><button data-action="edit" title="Edit connection" aria-label="Edit connection"><svg viewBox="0 0 24 24"><path d="m4 20 4.2-1 10.6-10.6a2 2 0 0 0-2.8-2.8L5.4 16.2Z"/></svg></button><button class="danger-action" data-action="delete" title="Remove connection" aria-label="Remove connection"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M9 11v6M15 11v6M6 7l1 14h10l1-14"/></svg></button></div></td></tr>`;
     }).join("");
     $("#linkTableEmpty").classList.toggle("hidden", app.state.links.length > 0);
   }
@@ -1034,7 +1039,7 @@
   }
 
   function serializableState() {
-    return { revision: app.state.revision, updated_at: app.state.updated_at, nodes: app.state.nodes, links: app.state.links, settings: app.state.settings };
+    return { revision: app.state.revision, updated_at: app.state.updated_at, nodes: app.state.nodes, links: app.state.links, areas: app.state.areas, settings: app.state.settings };
   }
 
   function renderRawJson(force) {
@@ -1061,12 +1066,12 @@
     app.activeView = name;
     $$('[data-view-panel]').forEach(panel => { const active = panel.dataset.viewPanel === name; panel.hidden = !active; panel.classList.toggle("active", active); });
     $$(".nav-item").forEach(button => { const active = button.dataset.view === name; button.classList.toggle("active", active); if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current"); });
-    $("#breadcrumbCurrent").textContent = name === "overview" ? "Overview" : "Configuration";
+    $("#breadcrumbCurrent").textContent = name === "overview" ? "Topology" : "Configuration";
     $("#appShell").classList.remove("nav-open"); $("#menuButton").setAttribute("aria-expanded", "false");
     if (name === "overview") {
       renderMap();
       renderInspector();
-      if (app.state.nodes.length) requestAnimationFrame(() => fitMap());
+      if (app.state.nodes.length || app.state.areas.length) requestAnimationFrame(() => fitMap());
     } else {
       renderActiveConfigPanel();
     }
@@ -1161,7 +1166,14 @@
     populateLinkSelects(link ? endpointId(link, "source") : sourceHint, link ? endpointId(link, "target") : null);
     $("#linkLabel").value = linkName(link || {});
     $("#linkType").value = linkKind(link || { kind: "ethernet" });
+    $("#linkSpeedPreset").innerHTML = '<option value="">Not specified</option>' + SPEED_PRESETS.map(speed => `<option value="${speed}">${escapeHtml(formatLinkSpeed(speed))}</option>`).join("") + '<option value="custom">Custom speed…</option>';
+    const speed = link?.bandwidth_mbps;
+    $("#linkSpeedPreset").value = speed == null ? "" : SPEED_PRESETS.includes(Number(speed)) ? String(Number(speed)) : "custom";
     $("#linkSpeed").value = link?.bandwidth_mbps ?? "";
+    $("#linkSpeedPreset").onchange = setLinkSpeedMode;
+    setLinkSpeedMode();
+    $("#linkDuplex").value = Object.hasOwn(DUPLEX_LABELS, link?.duplex) ? link.duplex : "unknown";
+    $("#speedPresetTableBody").innerHTML = SPEED_PRESETS.map(speed => `<tr><td>${escapeHtml(formatLinkSpeed(speed))}</td><td>${speed.toLocaleString()} Mbps</td></tr>`).join("");
     $("#linkStatus").value = link?.status || "active";
     $("#linkDirected").checked = Boolean(link?.directed);
     $("#linkNotes").value = link?.notes || "";
@@ -1177,8 +1189,9 @@
     const id = $("#linkId").value;
     const source = $("#linkSource").value; const target = $("#linkTarget").value;
     if (source === target) { toast("Choose two devices", "A connection cannot link a device to itself.", "error"); return; }
-    const speed = $("#linkSpeed").value;
-    const payload = { source, target, name: $("#linkLabel").value.trim(), kind: $("#linkType").value, status: $("#linkStatus").value, directed: $("#linkDirected").checked, bandwidth_mbps: speed === "" ? null : Number(speed), notes: $("#linkNotes").value.trim(), config: linkById(id)?.config || {} };
+    const preset = $("#linkSpeedPreset").value;
+    const speed = preset === "custom" ? $("#linkSpeed").value : preset;
+    const payload = { source, target, name: $("#linkLabel").value.trim(), kind: $("#linkType").value, status: $("#linkStatus").value, directed: $("#linkDirected").checked, bandwidth_mbps: speed === "" ? null : Number(speed), duplex: $("#linkDuplex").value, notes: $("#linkNotes").value.trim(), config: linkById(id)?.config || {} };
     const submit = $("#linkSubmit"); setBusy(submit, true, "Saving…");
     try {
       const next = await api(id ? `/api/links/${encodeURIComponent(id)}` : "/api/links", { method: id ? "PATCH" : "POST", body: JSON.stringify(payload), expectedRevision: Number(event.currentTarget.dataset.baseRevision) });
@@ -1232,7 +1245,7 @@
 
   async function saveRawJson() {
     const parsed = validateRawJson(); if (!parsed) { toast("Invalid JSON", "Fix the highlighted JSON error before saving.", "error"); return; }
-    askConfirmation({ title: "Replace this workspace?", message: "All current devices, connections, and settings will be replaced by the JSON editor contents.", label: "Replace workspace", busyLabel: "Replacing…", action: () => replaceState(parsed, "The JSON configuration is now active.", app.rawBaseRevision) });
+    askConfirmation({ title: "Replace this workspace?", message: "All current devices, connections, areas, and settings will be replaced by the JSON editor contents.", label: "Replace workspace", busyLabel: "Replacing…", action: () => replaceState(parsed, "The JSON configuration is now active.", app.rawBaseRevision) });
   }
 
   async function importState(payload, successMessage, expectedRevision = app.state.revision) {
@@ -1439,8 +1452,14 @@
     setTopologyEditing(false);
     loadInitialState();
     app.syncStatusTimer = setInterval(() => fetchSyncStatus().catch(() => {}), 4000);
-    if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+    if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/static/sw.js", { scope: "/" }).catch(() => {});
   }
 
+  const areaEditor = window.createNetworkMapAreas({
+    getState: () => app.state, isEditing: () => app.topologyEditing,
+    getTransform: () => app.transform, worldPoint, svgEl, escapeHtml, api,
+    applyState, applyTransform, askConfirmation, setBusy, toast, reportError,
+    showMap: () => switchView("overview")
+  });
   init();
 })();

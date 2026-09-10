@@ -11,6 +11,15 @@ Python or JavaScript dependencies. The Linux window uses the GTK 3 and WebKitGTK
 
 ## What is included
 
+- Linux-style utility interface with system fonts, compact toolbars, and light/dark themes
+- Original network-diagram device images for routers, switches, servers, PCs,
+  and the other device types; included locally for offline use
+- Labeled rectangle/square and ellipse/circle VLAN areas with drag/resize controls,
+  saved with topology backups and sync (visual annotations, not device configuration)
+- Common link-speed presets, custom Mbps, and documented duplex modes shown when
+  inspecting a device; these values are configured, not measured live
+- Quiet device icons: no connection-count badges; status dots only for recorded
+  offline/degraded states (no additional monitoring)
 - Locked-by-default topology with pan, zoom, fit-to-view, search, and an explicit
   edit mode for dragging nodes or changing links
 - Collapsible left navigation and a hide control for the header, overview heading,
@@ -101,6 +110,24 @@ synchronization is separate and never makes the window depend on remote uptime.
 Reuse is allowed only when the running API has the expected version, token, and
 database identity, preventing the window from silently opening another data
 directory's map.
+
+## Areas and link details
+
+Use **Edit topology → Add area** for a labeled rectangle or ellipse. Enter an
+optional VLAN ID and choose equal sides for a square or circle. Drag the region
+to move it, or its lower-right handle to resize it; hold Shift while resizing
+for equal sides. Click an area in edit mode to change its label and dimensions.
+**Configuration → Areas** also lists regions, including overlapping ones.
+Removing an area keeps every device and link inside it.
+
+Select a device to see each connection's configured speed and duplex. Edit the
+connection to choose a common speed, enter custom Mbps, or set duplex. The link
+editor includes a speed reference table. Unspecified values stay unspecified;
+this is documentation, not live link negotiation or traffic measurement.
+
+Areas and duplex are saved in topology exports and native sync. Upgrade both
+the hosted server and local app before using these new fields. Older backups
+without areas or duplex still import correctly.
 
 ## Open a real device
 
@@ -395,6 +422,17 @@ GTK/WebKit desktop bindings. `make test` needs only Python and runs the
 standard-library server and native-helper suites, so it is suitable for a
 headless host. `make smoke` starts a temporary live server and exercises its
 main HTTP workflow.
+
+Optional browser regression checks require Firefox and the Python `websockets`
+package, neither of which is needed by the application itself:
+
+```bash
+python3 scripts/browser_smoke_test.py
+```
+
+This uses disposable local data to test real area dragging/resizing, speed and
+duplex edits, error-only indicators, responsive controls, and offline assets.
+Screenshots are saved to a temporary directory printed by the script.
 
 ## License
 

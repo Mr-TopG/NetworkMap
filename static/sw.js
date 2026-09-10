@@ -1,6 +1,10 @@
-const CACHE = "networkmap-shell-v8";
-const SHELL = ["/", "/static/styles.css", "/static/app.js", "/static/favicon.svg", "/static/manifest.webmanifest"];
-const SHELL_PATHS = new Set(["/", "/index.html", "/static/styles.css", "/static/app.js", "/static/favicon.svg", "/static/manifest.webmanifest"]);
+const CACHE = "networkmap-shell-v10";
+const DEVICE_IMAGES = [
+  "router", "switch", "server", "workstation", "laptop", "mobile", "access-point",
+  "firewall", "printer", "camera", "storage", "nas", "iot", "cloud", "other"
+].map(kind => `/static/devices/${kind}.svg`);
+const SHELL = ["/", "/static/styles.css", "/static/areas.js", "/static/app.js", "/static/favicon.svg", "/static/manifest.webmanifest", ...DEVICE_IMAGES];
+const SHELL_PATHS = new Set([...SHELL, "/index.html"]);
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).catch(() => {}));

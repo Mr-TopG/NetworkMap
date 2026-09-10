@@ -10,6 +10,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -135,6 +136,28 @@ def run_workflow() -> None:
                 page = response.read().decode("utf-8")
             assert "NetworkMap" in page and "/static/app.js" in page
 
+            status, _, headers = request(running.url, "/static/sw.js")
+            expect_status(status, 200, "offline worker")
+            assert headers.get("Service-Worker-Allowed") == "/"
+
+            status, _, headers = request(running.url, "/static/areas.js")
+            expect_status(status, 200, "area editor module")
+            assert headers.get("Cache-Control") == "no-cache"
+
+            # Every equipment type must have a locally served, scalable image.
+            # The UI deliberately uses other.svg for the legacy unknown kind.
+            for kind in sorted(server.NODE_KINDS - {"unknown"}):
+                status, artwork, headers = request(
+                    running.url, f"/static/devices/{kind}.svg"
+                )
+                expect_status(status, 200, f"{kind} artwork")
+                assert headers.get("Content-Type", "").startswith("image/svg+xml")
+                assert headers.get("Service-Worker-Allowed") is None
+                assert isinstance(artwork, bytes)
+                svg = ET.fromstring(artwork)
+                assert svg.tag == "{http://www.w3.org/2000/svg}svg"
+                assert svg.get("viewBox") == "0 0 96 72"
+
 
 def run_auth_workflow() -> None:
     with tempfile.TemporaryDirectory(prefix="networkmap-auth-smoke-") as temporary:
@@ -171,7 +194,7 @@ def run_auth_workflow() -> None:
 def main() -> int:
     run_workflow()
     run_auth_workflow()
-    print("NetworkMap smoke test passed (web, CRUD, backup, guardrails, and auth).")
+    print("NetworkMap smoke test passed (web, device images, offline worker, CRUD, backup, guardrails, and auth).")
     return 0
 
 

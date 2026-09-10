@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,49 @@ def changed_name(running: server.ServerThread, name: str) -> dict:
 
 
 class TopologyDigestTests(unittest.TestCase):
+    def test_legacy_checkpoint_digest_survives_empty_area_and_duplex_defaults(self) -> None:
+        legacy = server.demo_document()
+        legacy.pop("areas")
+        for link in legacy["links"]:
+            link.pop("duplex")
+        legacy["nodes"].sort(key=lambda item: item["id"])
+        legacy["links"].sort(key=lambda item: item["id"])
+        old_digest = hashlib.sha256(json.dumps(
+            legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        self.assertEqual(sync.topology_digest(legacy), old_digest)
+        upgraded = server.validate_state_document(legacy)
+        self.assertEqual(upgraded["areas"], [])
+        self.assertEqual(sync.topology_digest(upgraded), old_digest)
+        upgraded["links"][0]["duplex"] = "full"
+        self.assertNotEqual(sync.topology_digest(upgraded), old_digest)
+
+    def test_area_changes_participate_and_area_order_is_stable(self) -> None:
+        original = server.demo_document()
+        changed = deepcopy(original)
+        changed["areas"] = [
+            server.validate_area({"id": "b", "label": "Guest", "vlan_id": 20}),
+            server.validate_area({"id": "a", "label": "Office", "vlan_id": 10}),
+        ]
+        self.assertNotEqual(sync.topology_digest(original), sync.topology_digest(changed))
+        reversed_areas = deepcopy(changed)
+        reversed_areas["areas"].reverse()
+        self.assertEqual(sync.topology_digest(changed), sync.topology_digest(reversed_areas))
+        canonical = sync.canonical_topology(changed)
+        self.assertEqual([item["id"] for item in canonical["areas"]], ["a", "b"])
+        canonical["areas"][0]["label"] = "Detached"
+        self.assertEqual(changed["areas"][1]["label"], "Office")
+        for field, value in (("x", 10), ("label", "New"), ("vlan_id", 30), ("width", 400)):
+            edited = deepcopy(changed)
+            edited["areas"][0][field] = value
+            self.assertNotEqual(sync.topology_digest(changed), sync.topology_digest(edited))
+        duplicate = deepcopy(changed)
+        duplicate["areas"].append(deepcopy(duplicate["areas"][0]))
+        with self.assertRaises(sync.SyncProtocolError):
+            sync.topology_digest(duplicate)
+        with self.assertRaises(sync.SyncProtocolError):
+            sync.topology_digest({**original, "areas": None})
+
     def test_digest_ignores_transport_metadata_and_entity_order(self) -> None:
         first = server.demo_document()
         first.update(
@@ -266,6 +310,60 @@ class SyncFileTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.files.backup_dir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(local.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(hosted.stat().st_mode), 0o600)
+
+
+class AreaSyncTests(unittest.TestCase):
+    """Exercise the real sync worker with local stores and no network sockets."""
+
+    def test_area_push_pull_removal_conflict_and_duplex(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            local = server.StateStore(root / "local.sqlite3")
+            hosted = server.StateStore(root / "hosted.sqlite3")
+            worker = sync.SyncWorker(
+                "http://local.example.test", "http://hosted.example.test", root / "sync",
+                demo_document=server.demo_document(),
+            )
+
+            def transport(store):
+                def request(method, path, *, document=None, expected_revision=None):
+                    if (method, path) == ("GET", "/api/health"):
+                        return {"status": "ok", **store.get_metadata()}
+                    if (method, path) == ("GET", "/api/state"):
+                        return store.get_state()
+                    if (method, path) == ("PUT", "/api/state"):
+                        return store.replace_state(document, expected_revision)
+                    raise AssertionError((method, path))
+                return request
+
+            with (
+                mock.patch.object(worker.local_client, "_request", side_effect=transport(local)),
+                mock.patch.object(worker.remote_client, "_request", side_effect=transport(hosted)),
+            ):
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                local.create_area({"id": "office", "label": "Office", "vlan_id": 10})
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                self.assertEqual(hosted.get_area("office"), local.get_area("office"))
+                hosted.update_area("office", {"shape": "ellipse", "x": 250})
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                self.assertEqual(local.get_area("office")["x"], 250)
+                link_id = local.get_state()["links"][0]["id"]
+                local.update_link(link_id, {"duplex": "full", "bandwidth_mbps": 2500})
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                self.assertEqual(hosted.get_link(link_id)["duplex"], "full")
+                self.assertEqual(hosted.get_link(link_id)["bandwidth_mbps"], 2500)
+                local.update_area("office", {"label": "Local label"})
+                hosted.update_area("office", {"label": "Hosted label"})
+                before_local, before_hosted = local.get_state(), hosted.get_state()
+                self.assertEqual(worker.sync_once()["state"], "conflict")
+                self.assertEqual(local.get_state(), before_local)
+                self.assertEqual(hosted.get_state(), before_hosted)
+                worker.write_command("use-local")
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                self.assertEqual(hosted.get_area("office")["label"], "Local label")
+                hosted.delete_area("office")
+                self.assertEqual(worker.sync_once()["state"], "synced")
+                self.assertEqual(local.get_state()["areas"], [])
 
 
 class ServerPairTests(unittest.TestCase):

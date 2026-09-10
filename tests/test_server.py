@@ -49,6 +49,65 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(node["winbox_enabled"])
         self.assertEqual(node["tags"], ["Office"])
 
+    def test_area_defaults_and_state_backward_compatibility(self) -> None:
+        area = server.validate_area({"label": " Office ", "vlan_id": 20})
+        self.assertEqual(area["label"], "Office")
+        self.assertEqual(area["shape"], "rectangle")
+        self.assertEqual(area["vlan_id"], 20)
+        self.assertEqual(area["width"], 320)
+        document = server.demo_document()
+        document.pop("areas")
+        self.assertEqual(server.validate_state_document(document)["areas"], [])
+        for link in document["links"]:
+            link.pop("duplex")
+        self.assertTrue(all(
+            link["duplex"] == "unknown"
+            for link in server.validate_state_document(document)["links"]
+        ))
+
+    def test_area_rejects_invalid_geometry_labels_and_vlan(self) -> None:
+        invalid_values = {
+            "x": [True, "0", float("nan"), float("inf"), -1_000_001],
+            "y": [False, 1_000_001],
+            "width": [0, 39, 100_001, float("inf")],
+            "height": [True, 39, 100_001],
+            "label": ["", " " * 3, "x" * 121, None],
+            "shape": ["triangle", None],
+            "color": ["red", "url(https://example.test)", None],
+            "vlan_id": [True, False, 0, 4095, 1.5, "20"],
+        }
+        for field, values in invalid_values.items():
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(server.APIError):
+                    server.validate_area({field: value})
+        area = server.validate_area({"id": "area-a"})
+        with self.assertRaises(server.APIError):
+            server.validate_area({"id": "area-b"}, partial=True, current=area)
+        with self.assertRaises(server.APIError):
+            server.validate_area({"script": "not allowed"})
+        for vlan_id in (None, 1, 4094):
+            self.assertEqual(server.validate_area({"vlan_id": vlan_id})["vlan_id"], vlan_id)
+
+    def test_state_rejects_invalid_or_duplicate_areas(self) -> None:
+        for areas in (None, {}, "bad", [{"id": "same"}, {"id": "same"}], [{}] * 1_001):
+            with self.subTest(areas_type=type(areas).__name__), self.assertRaises(server.APIError):
+                server.validate_state_document({**server.demo_document(), "areas": areas})
+
+    def test_link_duplex_defaults_validation_and_legacy_patch(self) -> None:
+        link = server.validate_link({"source": "a", "target": "b"})
+        self.assertEqual(link["duplex"], "unknown")
+        link.pop("duplex")
+        patched = server.validate_link({"notes": "Legacy"}, partial=True, current=link)
+        self.assertEqual(patched["duplex"], "unknown")
+        for duplex in ("full", "half", "auto", "unknown"):
+            self.assertEqual(
+                server.validate_link({"duplex": duplex}, partial=True, current=link)["duplex"],
+                duplex,
+            )
+        for duplex in (None, True, "", "simplex"):
+            with self.subTest(duplex=duplex), self.assertRaises(server.APIError):
+                server.validate_link({"duplex": duplex}, partial=True, current=link)
+
     def test_management_url_rejects_credentials_and_unsafe_schemes(self) -> None:
         for invalid in (
             "javascript:alert(1)",
@@ -242,6 +301,68 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(state["revision"], revision + 1)
         self.assertNotIn("Too late", {item["name"] for item in state["nodes"]})
 
+    def test_area_crud_revisions_persistence_and_duplicate_rejection(self) -> None:
+        revision = self.store.get_state()["revision"]
+        state = self.store.create_area({"id": "office", "label": "Office", "vlan_id": 20}, revision)
+        self.assertEqual(state["revision"], revision + 1)
+        self.assertEqual(self.store.get_area("office")["vlan_id"], 20)
+        self.assertEqual(server.StateStore(self.database).get_area("office")["label"], "Office")
+        with self.assertRaises(server.APIError) as raised:
+            self.store.create_area({"id": "office"})
+        self.assertEqual(raised.exception.code, "already_exists")
+        with self.assertRaises(server.APIError) as raised:
+            self.store.update_area("office", {"x": 100}, revision)
+        self.assertEqual(raised.exception.code, "revision_conflict")
+        self.assertEqual(self.store.get_area("office")["x"], 0)
+        state = self.store.update_area("office", {"shape": "ellipse", "x": -40}, state["revision"])
+        self.assertEqual(state["revision"], revision + 2)
+        self.assertEqual(state["areas"][0]["shape"], "ellipse")
+        self.assertEqual(state["areas"][0]["label"], "Office")
+        self.assertEqual(self.events[-1]["revision"], state["revision"])
+        with self.assertRaises(server.APIError):
+            self.store.delete_area("office", revision)
+        state = self.store.delete_area("office", state["revision"])
+        self.assertEqual(state["areas"], [])
+        self.assertEqual(state["revision"], revision + 3)
+        for action in (
+            lambda: self.store.get_area("office"),
+            lambda: self.store.update_area("office", {"label": "Missing"}),
+            lambda: self.store.delete_area("office"),
+        ):
+            with self.assertRaises(server.APIError) as raised:
+                action()
+            self.assertEqual(raised.exception.code, "not_found")
+
+    def test_area_limit_is_enforced_on_create(self) -> None:
+        document = self.store.get_state()
+        document["areas"] = [{"id": f"zone-{index}"} for index in range(server.MAX_AREAS)]
+        self.store.replace_state(document)
+        before = self.store.get_state()
+        with self.assertRaises(server.APIError):
+            self.store.create_area({"id": "too-many"})
+        self.assertEqual(self.store.get_state(), before)
+
+    def test_areas_and_duplex_roundtrip_import_and_reset(self) -> None:
+        state = self.store.create_area({"id": "vlan-30", "label": "Guest", "shape": "ellipse", "vlan_id": 30})
+        link_id = state["links"][0]["id"]
+        saved = self.store.update_link(link_id, {"duplex": "full", "bandwidth_mbps": 2500})
+        self.store.reset_demo()
+        self.assertEqual(self.store.get_state()["areas"], [])
+        restored = self.store.replace_state(json.loads(json.dumps(saved)))
+        self.assertEqual(restored["areas"], saved["areas"])
+        self.assertEqual(restored["links"], saved["links"])
+        legacy = deepcopy(saved)
+        legacy.pop("areas")
+        self.assertEqual(self.store.replace_state(legacy)["areas"], [])
+
+    def test_invalid_area_import_is_atomic(self) -> None:
+        before = self.store.get_state()
+        document = deepcopy(before)
+        document["areas"] = [{"width": -1}]
+        with self.assertRaises(server.APIError):
+            self.store.replace_state(document)
+        self.assertEqual(self.store.get_state(), before)
+
     def test_replace_with_empty_document_and_notification(self) -> None:
         previous = self.store.get_state()["revision"]
         state = self.store.replace_state(
@@ -384,6 +505,42 @@ class HTTPTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertEqual(invalid["error"]["code"], "validation_error")
+
+    def test_area_http_crud_and_revision_guard(self) -> None:
+        status, before, _ = self.request("/api/areas")
+        self.assertEqual(status, 200)
+        self.assertEqual(before["areas"], [])
+        status, created, _ = self.request(
+            "/api/areas", method="POST",
+            value={"id": "guest", "label": "Guest VLAN", "vlan_id": 40},
+            headers={"If-Match": str(before["revision"])},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["revision"], before["revision"] + 1)
+        status, item, _ = self.request("/api/areas/guest")
+        self.assertEqual(status, 200)
+        self.assertEqual(item["area"]["vlan_id"], 40)
+        status, conflict, _ = self.request(
+            "/api/areas/guest", method="PATCH", value={"x": 100},
+            headers={"If-Match": str(before["revision"])},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(conflict["error"]["code"], "revision_conflict")
+        status, changed, _ = self.request(
+            "/api/areas/guest", method="PATCH", value={"shape": "ellipse"},
+            headers={"If-Match": str(created["revision"])},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(changed["areas"][0]["shape"], "ellipse")
+        status, _, _ = self.request("/api/areas/guest", method="PATCH", value={"width": 0})
+        self.assertEqual(status, 400)
+        status, deleted, _ = self.request(
+            "/api/areas/guest", method="DELETE",
+            headers={"If-Match": str(changed["revision"])},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["areas"], [])
+        self.assertEqual(self.request("/api/areas/guest")[0], 404)
 
     def test_settings_export_and_import(self) -> None:
         status, state, _ = self.request(
